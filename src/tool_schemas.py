@@ -10,19 +10,134 @@ tool parsing / execution logic.
 
 import json
 import logging
+import re
+from collections import namedtuple
 from typing import Optional
 
-from src.agent_tools import ToolBlock, TOOL_TAGS
-from src.tool_parsing import _TOOL_NAME_MAP
 from src.tool_security import BUILTIN_EMAIL_TOOLS
 
 logger = logging.getLogger(__name__)
+ToolBlock = namedtuple("ToolBlock", ["tool_type", "content"])
+
+_TOOL_NAME_MAP = {
+    "shell": "bash",
+    "bash": "bash",
+    "terminal": "bash",
+    "command": "bash",
+    "execute": "bash",
+    "run": "bash",
+    "python": "python",
+    "code": "python",
+    "search": "web_search",
+    "web_search": "web_search",
+    "websearch": "web_search",
+    "google_search": "web_search",
+    "google_search_retrieval": "web_search",
+    "google_search_grounding": "web_search",
+    "web_fetch": "web_fetch",
+    "webfetch": "web_fetch",
+    "fetch_url": "web_fetch",
+    "fetch": "web_fetch",
+    "read": "read_file",
+    "read_file": "read_file",
+    "cat": "read_file",
+    "write": "write_file",
+    "write_file": "write_file",
+    "save": "write_file",
+    "document": "update_document",
+    "update_document": "update_document",
+    "create_document": "create_document",
+    "edit": "edit_document",
+    "edit_document": "edit_document",
+    "search_chats": "search_chats",
+    "search_conversations": "search_chats",
+    "find_chat": "search_chats",
+    "chat_with_model": "chat_with_model",
+    "ask_model": "chat_with_model",
+    "chat_model": "chat_with_model",
+    "create_session": "create_session",
+    "new_session": "create_session",
+    "list_sessions": "list_sessions",
+    "send_to_session": "send_to_session",
+    "message_session": "send_to_session",
+    "pipeline": "pipeline",
+    "chain": "pipeline",
+    "manage_session": "manage_session",
+    "session_control": "manage_session",
+    "manage_memory": "manage_memory",
+    "memory": "manage_memory",
+    "manage_tasks": "manage_tasks",
+    "tasks": "manage_tasks",
+    "schedule": "manage_tasks",
+    "manage_calendar": "manage_calendar",
+    "calendar": "manage_calendar",
+    "calander": "manage_calendar",
+    "calender": "manage_calendar",
+    "events": "manage_calendar",
+    "list_models": "list_models",
+    "models": "list_models",
+    "available_models": "list_models",
+    "ui_control": "ui_control",
+    "ui": "ui_control",
+    "control": "ui_control",
+    "api_call": "api_call",
+    "api": "api_call",
+    "integration": "api_call",
+    "ask_teacher": "ask_teacher",
+    "teacher": "ask_teacher",
+    "manage_skills": "manage_skills",
+    "skills": "manage_skills",
+    "skill": "manage_skills",
+    "suggest_document": "suggest_document",
+    "suggest": "suggest_document",
+    "review_document": "suggest_document",
+    "manage_endpoints": "manage_endpoints",
+    "endpoints": "manage_endpoints",
+    "manage_mcp": "manage_mcp",
+    "mcp_servers": "manage_mcp",
+    "manage_webhooks": "manage_webhooks",
+    "webhooks": "manage_webhooks",
+    "manage_tokens": "manage_tokens",
+    "tokens": "manage_tokens",
+    "manage_documents": "manage_documents",
+    "documents": "manage_documents",
+    "manage_gallery": "manage_gallery",
+    "gallery": "manage_gallery",
+    "manage_research": "manage_research",
+    "list_research": "manage_research",
+    "read_research": "manage_research",
+    "open_research": "manage_research",
+    "delete_research": "manage_research",
+    "manage_settings": "manage_settings",
+    "settings": "manage_settings",
+    "preferences": "manage_settings",
+    "manage_notes": "manage_notes",
+    "notes": "manage_notes",
+    "todo": "manage_notes",
+    "todos": "manage_notes",
+}
+
+
+def _known_tool_tags() -> set[str]:
+    try:
+        from src.agent_tools import TOOL_TAGS as tags
+
+        return set(tags)
+    except Exception:
+        names = {
+            schema.get("function", {}).get("name", "")
+            for schema in FUNCTION_TOOL_SCHEMAS
+            if isinstance(schema, dict)
+        }
+        names.update(_TOOL_NAME_MAP.values())
+        return {name for name in names if name}
 
 
 _REQUIRED_NATIVE_TOOL_ARGS = {
     "web_search": ("query", "queries"),
     "web_fetch": ("url",),
     "read_file": ("path",),
+    "read_attachment": ("attachment",),
     "write_file": ("path",),
     "edit_file": ("path",),
 }
@@ -35,7 +150,7 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "bash",
-            "description": "Run a shell command (full access). Prefer a dedicated tool whenever one fits the job (reading, writing, editing, searching, or listing files); use bash only for what no dedicated tool covers (installs, git, builds, running programs, system info). Do NOT create or edit files via bash redirects/heredocs/sed -- use the dedicated file tools.",
+            "description": "Run a shell command (full access). Prefer a dedicated tool when it is clearly simpler, but shell/PowerShell may create or edit files when that is the practical path. Use for installs, git, builds, running programs, system info, file operations, and scripts.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -49,7 +164,7 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "python",
-            "description": "Execute Python code to compute a result or test something. Prefer a dedicated tool whenever one fits the job (reading, writing, or searching files); use python only for computation, data processing, or scripting no dedicated tool covers.",
+            "description": "Execute Python code to compute, test, inspect, or transform data/files. Prefer a dedicated tool when it is clearly simpler, but Python may read, write, or edit files when a script is the practical path.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -102,6 +217,20 @@ FUNCTION_TOOL_SCHEMAS = [
                     "limit": {"type": "integer", "description": "Max number of lines to read from offset (optional)"}
                 },
                 "required": ["path"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_attachment",
+            "description": "Read an attachment from this chat by its upload id or odysseus://attachment/<id> URI. This is owner-checked and does not accept filesystem paths.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "attachment": {"type": "string", "description": "Exact upload id or odysseus://attachment/<id> URI from the chat attachment manifest"}
+                },
+                "required": ["attachment"]
             }
         }
     },
@@ -179,7 +308,7 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "edit_file",
-            "description": "Edit a file ON DISK by exact string replacement (home folder, project files, any real path like ~/sweden.txt or /path/to/file). This is the right tool for files on disk — NOT edit_document (that's for editor-panel documents). PREFER this over bash (sed/echo) — it shows a diff. old_string must match the file exactly and be unique (or set replace_all). Use write_file to create a new file.",
+            "description": "Edit a file ON DISK by exact string replacement (home folder, project files, any real path like ~/sweden.txt or /path/to/file). This is the right tool for small targeted disk edits when a clear diff is useful — NOT edit_document (that's for editor-panel documents). old_string must match the file exactly and be unique (or set replace_all). Use write_file to create a new file, or use shell/Python when a scripted edit is more practical.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -425,13 +554,13 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "ui_control",
-            "description": "Control the user interface. Actions: toggle (turn tools on/off), open_panel (open a modal: documents/library, gallery, email, sessions, notes, memories/brain, skills, settings, cookbook), open_email_reply (open an email reply draft document; DOES NOT send. For 'write/draft a reply saying X', include body with the drafted reply), set_mode, switch_model, set_theme (built-in presets: dark, light, midnight, paper, cyberpunk, retrowave, forest, ocean, ume, copper, terminal, organs, lavender, gpt, claude, cute), create_theme (CREATE any custom theme with a name + colors object — pick distinctive, evocative hex colors that match the requested aesthetic, NOT generic defaults. The theme auto-applies after creation). When a user asks for ANY theme not in the built-in preset list, ALWAYS use create_theme.",
+            "description": "Control the user interface. Actions: toggle (turn tools on/off), open_panel (open a modal: documents/library, gallery, email, sessions, notes, calendar, tasks, research, workspace, memories/brain, skills, settings, cookbook), open_email_reply (open an email reply draft document; does NOT send), set_mode, switch_model, set_theme (built-in presets: dark, light, midnight, paper, cyberpunk, retrowave, forest, ocean, ume, copper, terminal, organs, lavender, gpt, claude, cute), create_theme (CREATE any custom theme with a name + colors object — pick distinctive, evocative hex colors that match the requested aesthetic, NOT generic defaults. The theme auto-applies after creation). When a user asks for ANY theme not in the built-in preset list, ALWAYS use create_theme.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "action": {"type": "string", "enum": ["toggle", "open_panel", "open_email_reply", "set_mode", "switch_model", "set_theme", "create_theme", "get_toggles"],
                                "description": "The UI action. Use set_theme for presets, create_theme to build a custom theme with any hex colors"},
-                    "name": {"type": "string", "description": "For toggle: web, bash, research, incognito, document_editor (aliases: shell, search, deepresearch, documents). For open_panel: documents, gallery, email, sessions, notes, brain/memories, skills, settings, cookbook. For open_email_reply: email UID. For set_theme: a preset theme name. For create_theme: the custom theme name."},
+                    "name": {"type": "string", "description": "For toggle: web, bash, research, incognito, document_editor (aliases: shell, search, deepresearch, documents). For open_panel: documents, gallery, email, sessions, notes, calendar, tasks, research, workspace, brain/memories, skills, settings, cookbook. For open_email_reply: email UID. For set_theme: a preset theme name. For create_theme: the custom theme name."},
                     "value": {"type": "string", "description": "Value: on/off for toggle, agent/chat for set_mode, model name for switch_model, theme name for set_theme, or folder for open_email_reply"},
                     "uid": {"type": "string", "description": "Email UID for open_email_reply"},
                     "folder": {"type": "string", "description": "Email folder for open_email_reply (default INBOX)"},
@@ -762,12 +891,12 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "manage_documents",
-            "description": "Manage documents: list all documents (with optional search/language filter), delete documents, or run tidy cleanup.",
+            "description": "Manage in-app editor Documents/Library documents only: list/read editor documents, delete documents, or run tidy cleanup. Do NOT use for workspace/project/repo/disk files, source code, folders, or Notes; use file tools or manage_notes for those.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "action": {"type": "string", "enum": ["list", "delete", "tidy"]},
-                    "document_id": {"type": "string", "description": "Document ID (for delete)"},
+                    "action": {"type": "string", "enum": ["list", "read", "delete", "tidy"]},
+                    "document_id": {"type": "string", "description": "Document ID (for read/delete)"},
                     "search": {"type": "string", "description": "Search query (for list)"},
                     "language": {"type": "string", "description": "Filter by language (for list)"},
                     "limit": {"type": "integer", "description": "Max results (for list, default 50)"}
@@ -989,17 +1118,152 @@ FUNCTION_TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "manage_gallery",
+            "description": "List, search, inspect, or describe images saved in the user's Gallery. Use this when the user asks whether you can see their gallery/photos, wants to find/use a gallery image, or asks what is in a saved image. action='describe' uses the configured vision model when available.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["list", "search", "get", "describe"], "description": "list/search returns matching Gallery images; get returns metadata; describe sends one image to the vision model."},
+                    "query": {"type": "string", "description": "Search text for prompt/name/tags/model. Also used to pick the newest match when image_id is omitted for get/describe."},
+                    "image_id": {"type": "string", "description": "Gallery image ID for get/describe."},
+                    "tag": {"type": "string", "description": "Optional comma-separated tag filter for list/search."},
+                    "album_id": {"type": "string", "description": "Optional album ID filter for list/search."},
+                    "favorites": {"type": "boolean", "description": "Only return favorited images."},
+                    "limit": {"type": "integer", "description": "Maximum list/search results to return, 1-25."},
+                    "include_description": {"type": "boolean", "description": "For get, also run vision description."}
+                },
+                "required": ["action"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "generate_image",
+            "description": "Generate a professional AI image file from a text prompt, save it to Odysseus generated media/Gallery, and render it inline. Use the selected or explicitly provided image-capable model/backend. Do not answer image creation requests with SVG, HTML, code, or prompt-only workarounds unless the user explicitly asks for that format.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "prompt": {"type": "string", "description": "Subject-first image prompt. Include composition, use case, visual style, lighting, and any exact text in quotes."},
+                    "provider": {"type": "string", "enum": ["comfyui", "runcomfy"], "description": "Optional media backend. comfyui = free local ComfyUI; runcomfy = paid RunComfy Cloud integration."},
+                    "integration": {"type": "string", "description": "Optional integration id/name to use when multiple ComfyUI/RunComfy integrations exist."},
+                    "model": {"type": "string", "description": "Optional explicit image model or RunComfy model id."},
+                    "size": {"type": "string", "description": "Size such as 1024x1024, 1024x1536, 1536x1024, or 1536x864"},
+                    "aspect_ratio": {"type": "string", "description": "Optional aspect such as 16:9, 9:16, 1:1, 3:2, or 2:3 when size is omitted"},
+                    "style": {"type": "string", "description": "Optional concise art direction, e.g. editorial product photography, premium SaaS ad, cinematic concept art"},
+                    "quality": {"type": "string", "enum": ["draft", "low", "medium", "high", "auto", "professional", "premium"], "description": "Image quality/tier. Use professional or high for normal final work; premium for brand/hero assets."},
+                    "enhance_prompt": {"type": "boolean", "description": "Default true. Adds professional composition/lighting/production cues without changing the subject."},
+                    "seed": {"type": "integer", "description": "Optional seed for reproducibility"}
+                },
+                "required": ["prompt"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "edit_image",
-            "description": "Edit a gallery image: upscale, remove background, inpaint, or harmonize.",
+            "description": "Edit a saved Gallery image and save the edited copy back to Gallery. Use manage_gallery first when you need an image_id. Inpaint requires a mask or mask_image_id; harmonize needs a configured diffusion/img2img endpoint; sharpen works locally.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "image_id": {"type": "string", "description": "Gallery image ID"},
-                    "action": {"type": "string", "enum": ["upscale", "rembg", "inpaint", "harmonize"], "description": "Edit action"},
-                    "prompt": {"type": "string", "description": "For inpaint: what to fill the masked area with"},
+                    "action": {"type": "string", "enum": ["sharpen", "denoise", "upscale", "rembg", "remove_bg", "inpaint", "harmonize", "enhance_face"], "description": "Edit action"},
+                    "prompt": {"type": "string", "description": "For inpaint/harmonize: the desired visual change"},
                     "scale": {"type": "number", "description": "For upscale: scale factor (default 2)"},
+                    "amount": {"type": "number", "description": "For sharpen: amount 0-100 (default 50)"},
+                    "strength": {"type": "number", "description": "For denoise/harmonize/inpaint: edit strength 0-1"},
+                    "mask": {"type": "string", "description": "Base64 PNG mask for inpaint; white pixels mark the area to regenerate"},
+                    "mask_image_id": {"type": "string", "description": "Gallery image ID containing a mask for inpaint"},
+                    "name": {"type": "string", "description": "Optional name for the edited copy saved to Gallery"}
                 },
                 "required": ["image_id", "action"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "generate_video",
+            "description": "Generate a professional AI video with the selected or explicitly provided media backend, save the downloaded file to Odysseus generated media/Gallery, and render it inline. RunComfy Cloud is an explicit paid integration; local ComfyUI requires an exact workflow JSON.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "prompt": {"type": "string", "description": "Subject-first video direction. Include one main action, scene, motion verbs, camera movement, lighting, and audio notes when relevant."},
+                    "provider": {"type": "string", "enum": ["gemini", "comfyui", "runcomfy"], "description": "Optional media backend. gemini = Gemini/Veo API; comfyui = free local workflow; runcomfy = paid RunComfy Cloud integration."},
+                    "integration": {"type": "string", "description": "Optional integration id/name to use when multiple ComfyUI/RunComfy integrations exist."},
+                    "model": {"type": "string", "description": "Optional explicit video model id."},
+                    "duration": {"type": "integer", "description": "Duration in seconds"},
+                    "aspect_ratio": {"type": "string", "description": "Aspect ratio such as 16:9, 9:16, 1:1, or 21:9"},
+                    "resolution": {"type": "string", "description": "Resolution such as 720p, 1080p, or 4k when supported"},
+                    "quality": {"type": "string", "enum": ["draft", "professional", "premium", "hero", "4k"], "description": "Video tier. professional is the default; premium/hero/4k may pick higher-cost models."},
+                    "camera": {"type": "string", "description": "Optional camera direction, e.g. slow push-in, locked tripod, handheld tracking shot, drone pullback"},
+                    "image_url": {"type": "string", "description": "Optional source image URL for image-to-video models"},
+                    "audio_url": {"type": "string", "description": "Optional source audio URL for lip-sync/audio-driven models"},
+                    "seed": {"type": "integer", "description": "Optional seed"},
+                    "enhance_prompt": {"type": "boolean", "description": "Default true. Adds professional camera, lighting, audio, and color-grade cues."},
+                    "input": {"type": "object", "description": "Exact RunComfy JSON input body or exact ComfyUI workflow object; overrides generated defaults"},
+                    "workflow": {"type": "object", "description": "Exact ComfyUI workflow JSON for provider=comfyui"},
+                    "timeout": {"type": "integer", "description": "Timeout in seconds"}
+                },
+                "required": ["prompt"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "generate_music",
+            "description": "Generate professional AI music/audio with an explicitly selected media backend, save it to Odysseus generated media, and render it inline. RunComfy Cloud requires an enabled paid integration; local ComfyUI requires an exact workflow JSON.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "prompt": {"type": "string", "description": "Style brief or full ElevenLabs prompt. Include genre, mood, instrumentation, vocal type, BPM, arrangement, and use case."},
+                    "provider": {"type": "string", "enum": ["comfyui", "runcomfy"], "description": "Optional media backend. comfyui = free local workflow; runcomfy = paid RunComfy Cloud integration."},
+                    "integration": {"type": "string", "description": "Optional integration id/name to use when multiple ComfyUI/RunComfy integrations exist."},
+                    "model": {"type": "string", "description": "Optional explicit RunComfy model id."},
+                    "quality": {"type": "string", "enum": ["draft", "professional", "premium", "commercial", "broadcast"], "description": "Audio tier. professional defaults to ACE Step 1.5; premium/commercial defaults to ElevenLabs Music."},
+                    "tags": {"type": "string", "description": "ACE Step style tags, e.g. indie pop, driving drums, female vocal, 120 BPM, polished mix"},
+                    "lyrics": {"type": "string", "description": "Lyrics with section markers, or [inst] for instrumental"},
+                    "duration": {"type": "integer", "description": "Duration in seconds"},
+                    "bpm": {"type": "integer", "description": "Optional tempo"},
+                    "mood": {"type": "string", "description": "Optional mood/energy direction"},
+                    "loop": {"type": "boolean", "description": "Make the track loop-friendly when true"},
+                    "force_instrumental": {"type": "boolean", "description": "When true and lyrics are omitted, generate instrumental audio"},
+                    "audio": {"type": "string", "description": "Optional source audio URL for inpaint/outpaint endpoints"},
+                    "start_time": {"type": "number", "description": "Audio edit start time"},
+                    "end_time": {"type": "number", "description": "Audio edit end time"},
+                    "extend_before_duration": {"type": "number", "description": "Seconds to add before source audio"},
+                    "extend_after_duration": {"type": "number", "description": "Seconds to add after source audio"},
+                    "enhance_prompt": {"type": "boolean", "description": "Default true. Adds professional arrangement/mix/master cues."},
+                    "input": {"type": "object", "description": "Exact RunComfy JSON input body or exact ComfyUI workflow object; overrides generated defaults"},
+                    "workflow": {"type": "object", "description": "Exact ComfyUI workflow JSON for provider=comfyui"},
+                    "timeout": {"type": "integer", "description": "Timeout in seconds"}
+                },
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "runcomfy_media",
+            "description": "Run any exact media backend request from a viewed skill. Use provider=comfyui for a free local ComfyUI workflow, or provider=runcomfy for a paid RunComfy Cloud model_id/input body.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "media_type": {"type": "string", "enum": ["image", "video", "music", "audio"], "description": "Output family"},
+                    "provider": {"type": "string", "enum": ["comfyui", "runcomfy"], "description": "Media backend. comfyui = local workflow; runcomfy = paid cloud integration."},
+                    "integration": {"type": "string", "description": "Optional integration id/name to use when multiple ComfyUI/RunComfy integrations exist."},
+                    "model_id": {"type": "string", "description": "RunComfy model id, e.g. blackforestlabs/flux-2-klein/9b/text-to-image"},
+                    "input": {"type": "object", "description": "Exact RunComfy JSON request body or exact ComfyUI workflow object"},
+                    "workflow": {"type": "object", "description": "Exact ComfyUI workflow JSON for provider=comfyui"},
+                    "prompt": {"type": "string", "description": "Optional prompt if input is omitted"},
+                    "quality": {"type": "string", "description": "Optional tier hint such as professional, premium, draft, commercial, hero, or 4k"},
+                    "enhance_prompt": {"type": "boolean", "description": "Default true when input is omitted; ignored for exact input bodies"},
+                    "timeout": {"type": "integer", "description": "Timeout in seconds"}
+                },
+                "required": ["media_type"]
             }
         }
     },
@@ -1291,7 +1555,9 @@ def _repair_document_function_args(tool_type: str, arguments: str) -> Optional[d
 
 def function_call_to_tool_block(name: str, arguments: str) -> Optional[ToolBlock]:
     """Convert a native function call into a ToolBlock for the existing execution pipeline."""
-    tool_type = _TOOL_NAME_MAP.get(name, name)
+    raw_name = str(name or "").strip()
+    canonical_name = re.sub(r"[\s-]+", "_", raw_name).lower()
+    tool_type = _TOOL_NAME_MAP.get(canonical_name, canonical_name)
     try:
         if not arguments or (isinstance(arguments, str) and not arguments.strip()):
             args = {}
@@ -1300,9 +1566,9 @@ def function_call_to_tool_block(name: str, arguments: str) -> Optional[ToolBlock
     except (json.JSONDecodeError, TypeError):
         args = _repair_document_function_args(tool_type, arguments)
         if args is not None:
-            logger.warning(f"Repaired malformed document function call arguments for {name}")
+            logger.warning(f"Repaired malformed document function call arguments for {raw_name}")
         else:
-            logger.error(f"Failed to parse function call arguments for {name}: {arguments}")
+            logger.error(f"Failed to parse function call arguments for {raw_name}: {arguments}")
             return None
 
     # Some models emit valid JSON that isn't an object (e.g. a bare array
@@ -1312,15 +1578,15 @@ def function_call_to_tool_block(name: str, arguments: str) -> Optional[ToolBlock
     # Uses the shared BUILTIN_EMAIL_TOOLS (single source of truth) so the
     # fail-closed set can't drift from the dispatch/blocklist sets.
     if not isinstance(args, dict):
-        if tool_type.startswith("mcp__email__") or name in BUILTIN_EMAIL_TOOLS:
-            logger.warning(f"Non-object email function call arguments for {name}: {args!r}; rejecting")
+        if tool_type.startswith("mcp__email__") or canonical_name in BUILTIN_EMAIL_TOOLS:
+            logger.warning(f"Non-object email function call arguments for {raw_name}: {args!r}; rejecting")
             return None
-        logger.warning(f"Non-object function call arguments for {name}: {args!r}; treating as empty")
+        logger.warning(f"Non-object function call arguments for {raw_name}: {args!r}; treating as empty")
         args = {}
 
     required_args = _REQUIRED_NATIVE_TOOL_ARGS.get(tool_type)
     if required_args and not any(str(args.get(key) or "").strip() for key in required_args):
-        logger.warning(f"Rejecting empty required arguments for function call {name}: {args!r}")
+        logger.warning(f"Rejecting empty required arguments for function call {raw_name}: {args!r}")
         return None
 
     # Allow MCP tools through (namespaced as mcp__serverid__toolname)
@@ -1328,10 +1594,10 @@ def function_call_to_tool_block(name: str, arguments: str) -> Optional[ToolBlock
         content = json.dumps(args) if args else "{}"
         return ToolBlock(tool_type, content)
     # Email tools are implemented as MCP — route them to email
-    if name in BUILTIN_EMAIL_TOOLS:
-        return ToolBlock(f"mcp__email__{name}", json.dumps(args) if args else "{}")
-    if tool_type not in TOOL_TAGS:
-        logger.warning(f"Unknown function call: {name}")
+    if canonical_name in BUILTIN_EMAIL_TOOLS:
+        return ToolBlock(f"mcp__email__{canonical_name}", json.dumps(args) if args else "{}")
+    if tool_type not in _known_tool_tags():
+        logger.warning(f"Unknown function call: {raw_name}")
         return None
 
     # Convert structured args back to the text format each tool expects
@@ -1452,6 +1718,10 @@ def function_call_to_tool_block(name: str, arguments: str) -> Optional[ToolBlock
             content = action
     elif tool_type == "list_models":
         content = args.get("filter", "")
+    elif tool_type == "generate_image":
+        content = json.dumps(args)
+    elif tool_type in ("generate_video", "generate_music", "runcomfy_media"):
+        content = json.dumps(args)
     elif tool_type == "ui_control":
         action = args.get("action", "")
         name = args.get("name", "")

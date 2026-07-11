@@ -57,8 +57,15 @@ def test_genuine_keywords_still_force_include():
     assert "serve_model" in ti.get_tools_for_query("serve the model")
 
 
-def test_find_info_online_forces_web_search_tools():
+def test_media_words_do_not_force_generation_tools():
     ti = _index()
-    tools = ti.get_tools_for_query("find info online about crow box designs")
-    assert "web_search" in tools
-    assert "web_fetch" in tools
+    for q in (
+        "make me a dog image",
+        "create a short video",
+        "photo of a product on a table",
+        "show my gallery photos",
+    ):
+        tools = ti.get_tools_for_query(q)
+        assert "generate_image" not in tools, q
+        assert "generate_video" not in tools, q
+        assert "generate_music" not in tools, q

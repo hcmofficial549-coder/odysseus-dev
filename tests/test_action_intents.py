@@ -1,3 +1,5 @@
+import pytest
+
 from src.action_intents import classify_tool_intent, message_needs_tools
 
 
@@ -49,11 +51,18 @@ def test_research_action_promotes_to_agent():
     assert message_needs_tools("can you look into GPU hosting options")
 
 
-def test_explicit_web_search_promotes_to_agent():
-    assert message_needs_tools("use web search and find a recipe for chocolate chip cookies")
-    assert message_needs_tools("do a web search for the best chocolate chip cookies")
-    assert message_needs_tools("search the web for current RTX 3090 prices")
-    assert classify_tool_intent("use web search and find a recipe").category == "web"
+def test_bare_source_paths_promote_to_agent_file_tools():
+    intent = classify_tool_intent(
+        "patch GUI/embedding_manager.py, GUI/embedding_worker.py, rag_core.py, and requirements-embeddings.txt"
+    )
+    assert intent.needs_tools
+    assert intent.category == "files"
+
+
+def test_explicit_get_workspace_tool_name_promotes_to_agent_file_tools():
+    intent = classify_tool_intent("use Get_Workspace and return a summary of the project")
+    assert intent.needs_tools
+    assert intent.category == "files"
 
 
 def test_explanatory_calendar_questions_stay_plain_chat():
@@ -69,3 +78,22 @@ def test_router_reports_non_calendar_categories():
     assert classify_tool_intent("reply to that email").category == "email"
     assert classify_tool_intent("open my calendar").category == "ui"
     assert classify_tool_intent("research cost effective local models").category == "research"
+
+
+@pytest.mark.parametrize("message", [
+    "inspect the image I uploaded earlier",
+    "look at the image I uploaded earlier",
+    "analyze the file I uploaded earlier",
+    "read the PDF I attached earlier",
+    "what was in the image I sent before?",
+    "review my previous attachment",
+])
+def test_historical_attachment_requests_promote_to_owner_checked_agent_path(message):
+    intent = classify_tool_intent(message)
+
+    assert intent.needs_tools
+    assert intent.category == "files"
+
+
+def test_explanatory_attachment_question_stays_plain_chat():
+    assert not message_needs_tools("How do I inspect an attachment from an earlier turn?")

@@ -63,3 +63,17 @@ def test_plain_tell_request_stays_minimal():
     assert not (_EMAIL_TOOLS & tools)
     # Always-available baseline is still there.
     assert set(ALWAYS_AVAILABLE) <= tools
+
+
+def test_bare_source_paths_force_workspace_file_tools():
+    ti = _index_without_embeddings()
+    tools = ti.get_tools_for_query(
+        "patch GUI/embedding_manager.py, GUI/embedding_worker.py, rag_core.py, and requirements-embeddings.txt"
+    )
+    assert {"get_workspace", "read_file", "write_file", "edit_file", "grep"} <= tools
+
+
+def test_explicit_get_workspace_tool_name_forces_workspace_file_tools():
+    ti = _index_without_embeddings()
+    tools = ti.get_tools_for_query("use Get_Workspace and return a summary of the project")
+    assert {"get_workspace", "read_file", "grep", "ls"} <= tools

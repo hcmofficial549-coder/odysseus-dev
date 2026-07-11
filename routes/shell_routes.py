@@ -42,6 +42,7 @@ from fastapi import APIRouter, Request, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from core.constants import BASE_DIR
 from core.platform_compat import (
     IS_WINDOWS,
     detached_popen_kwargs,
@@ -53,6 +54,8 @@ from core.platform_compat import (
 def _require_admin(request: Request):
     """Reject non-admin callers. Shell exec is admin-only — never expose to
     regular users; that's RCE-after-signup."""
+    if os.getenv("AUTH_ENABLED", "true").lower() == "false":
+        return
     auth_manager = getattr(request.app.state, "auth_manager", None)
     if not auth_manager:
         # No auth at all — only safe in fully-trusted localhost dev mode
@@ -114,6 +117,100 @@ DOCKER_IN_CONTAINER_HINT = HOST_DOCKER_ACCESS_HINT
 DockerRowStatus = namedtuple("DockerRowStatus", ["applicable", "install_hint"])
 PackageUpdateStatus = namedtuple("PackageUpdateStatus", ["available", "note"])
 
+IMAGE_RUNTIME_PACKAGE_NAMES = {
+    "diffusers",
+    "onnxruntime",
+    "onnxruntime-directml",
+    "onnxruntime-gpu",
+}
+
+
+REMBG_MODEL_DEPENDENCIES = {
+    "silueta": {
+        "filename": "silueta.onnx",
+        "url": "https://github.com/danielgatis/rembg/releases/download/v0.0.0/silueta.onnx",
+        "bytes": 44173029,
+        "desc": "Higher-quality rembg background-removal model. Better than u2netp, smaller than ISNet.",
+    },
+    "isnet-general-use": {
+        "filename": "isnet-general-use.onnx",
+        "url": "https://github.com/danielgatis/rembg/releases/download/v0.0.0/isnet-general-use.onnx",
+        "bytes": 178648008,
+        "desc": "High-quality general rembg background-removal model. Best quality, larger download.",
+    },
+}
+
+
+def _rembg_model_home() -> Path:
+    """Return the model cache directory used by rembg/pooch."""
+    configured = os.environ.get("U2NET_HOME")
+    if configured:
+        return Path(configured).expanduser()
+    xdg = os.environ.get("XDG_DATA_HOME")
+    if xdg:
+        return Path(xdg).expanduser() / ".u2net"
+    return Path.home() / ".u2net"
+
+
+def _rembg_model_path(model_key: str) -> Path | None:
+    spec = REMBG_MODEL_DEPENDENCIES.get(model_key)
+    if not spec:
+        return None
+    return _rembg_model_home() / spec["filename"]
+
+
+def _rembg_model_status(model_key: str) -> tuple[bool, str]:
+    path = _rembg_model_path(model_key)
+    spec = REMBG_MODEL_DEPENDENCIES.get(model_key) or {}
+    if not path:
+        return False, ""
+    expected = int(spec.get("bytes") or 0)
+    if path.exists() and path.is_file() and path.stat().st_size > 0:
+        size_mb = path.stat().st_size / (1024 * 1024)
+        if expected and path.stat().st_size < max(1, expected // 2):
+            return False, f"Partial file at {path} ({size_mb:.1f} MB). Reinstall to repair."
+        return True, f"{path} ({size_mb:.1f} MB)"
+    size_note = f"{expected / (1024 * 1024):.1f} MB" if expected else "model file"
+    return False, f"Downloads {size_note} to {path}."
+
+
+def _download_rembg_model(model_key: str) -> dict:
+    import urllib.request
+
+    spec = REMBG_MODEL_DEPENDENCIES.get(model_key)
+    if not spec:
+        raise HTTPException(400, "Unknown rembg model")
+    dest = _rembg_model_path(model_key)
+    if dest is None:
+        raise HTTPException(400, "Unknown rembg model")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_suffix(dest.suffix + ".download")
+    try:
+        req = urllib.request.Request(
+            spec["url"],
+            headers={"User-Agent": "odysseus-cookbook/1.0"},
+        )
+        with urllib.request.urlopen(req, timeout=120) as response, tmp.open("wb") as fh:
+            shutil.copyfileobj(response, fh)
+        if tmp.stat().st_size <= 0:
+            raise RuntimeError("downloaded file is empty")
+        expected = int(spec.get("bytes") or 0)
+        if expected and tmp.stat().st_size < max(1, expected // 2):
+            raise RuntimeError("downloaded file is incomplete")
+        tmp.replace(dest)
+        return {
+            "ok": True,
+            "model": model_key,
+            "path": str(dest),
+            "bytes": dest.stat().st_size,
+        }
+    finally:
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except Exception:
+            pass
+
 
 def _docker_row_status(
     *, on_remote, in_container, installed, default_hint, host_docker_access=False
@@ -142,9 +239,11 @@ def _pip_dist_name(pkg: dict) -> str:
     return (pkg.get("name") or "").replace("_", "-")
 
 
-def _import_optional_dependency_for_status(name: str):
-    prepare_optional_dependency_import(name)
-    return importlib.import_module(name)
+def _pip_dist_names(pkg: dict) -> list[str]:
+    names = pkg.get("dist_names")
+    if isinstance(names, list) and names:
+        return [str(name) for name in names if str(name).strip()]
+    return [_pip_dist_name(pkg)]
 
 
 def _package_installed_from_probe(name: str, probe: dict) -> bool:
@@ -170,6 +269,29 @@ def _package_installed_from_probe(name: str, probe: dict) -> bool:
         return bool(
             (dists.get("diffusers") or modules.get("diffusers", {}).get("real_module"))
             and (dists.get("torch") or modules.get("torch", {}).get("real_module"))
+        )
+    if name == "onnxruntime":
+        return bool(
+            modules.get("onnxruntime", {}).get("real_module")
+            and (
+                dists.get("onnxruntime")
+                or dists.get("onnxruntime-directml")
+                or dists.get("onnxruntime-gpu")
+            )
+        )
+    if name == "onnxruntime-directml":
+        providers = probe.get("providers") if isinstance(probe.get("providers"), list) else []
+        return bool(
+            dists.get("onnxruntime-directml")
+            and modules.get("onnxruntime", {}).get("real_module")
+            and "DmlExecutionProvider" in providers
+        )
+    if name == "onnxruntime-gpu":
+        providers = probe.get("providers") if isinstance(probe.get("providers"), list) else []
+        return bool(
+            dists.get("onnxruntime-gpu")
+            and modules.get("onnxruntime", {}).get("real_module")
+            and "CUDAExecutionProvider" in providers
         )
     if name == "hf_transfer":
         return bool(
@@ -212,10 +334,23 @@ def _package_status_note(name: str, probe: dict) -> str:
         if _package_installed_from_probe(name, probe):
             return f"diffusers {dists.get('diffusers', 'available')} with torch {dists.get('torch', 'available')}"
         return "Diffusers serving needs both diffusers and torch."
-    if name == "mlx_lm":
-        if _package_installed_from_probe(name, probe):
-            return f"MLX LM {dists.get('mlx-lm', 'available')}"
-        return "MLX serving needs mlx-lm on an Apple Silicon Mac."
+    if name in {"onnxruntime", "onnxruntime-directml", "onnxruntime-gpu"}:
+        providers = probe.get("providers") if isinstance(probe.get("providers"), list) else []
+        provider_note = f"; providers: {', '.join(providers)}" if providers else ""
+        if name == "onnxruntime-directml":
+            if _package_installed_from_probe(name, probe):
+                return f"onnxruntime-directml {dists.get('onnxruntime-directml', 'available')}{provider_note}"
+            return "DirectML provider not available. Install onnxruntime-directml in the selected environment."
+        if name == "onnxruntime-gpu":
+            if _package_installed_from_probe(name, probe):
+                return f"onnxruntime-gpu {dists.get('onnxruntime-gpu', 'available')}{provider_note}"
+            return "CUDA provider not available. Install onnxruntime-gpu on an NVIDIA/CUDA environment."
+        versions = [
+            f"{dist} {version}"
+            for dist, version in dists.items()
+            if dist in {"onnxruntime", "onnxruntime-directml", "onnxruntime-gpu"}
+        ]
+        return ("; ".join(versions) if versions else "ONNX Runtime not found") + provider_note
     if name in dists:
         return f"{name} {dists[name]}"
     return ""
@@ -264,6 +399,11 @@ def _package_pip_update_status(
             False,
             "Using a vLLM CLI on PATH without Python package metadata; update it outside Odysseus.",
         )
+    if isinstance(probe, dict) and probe.get("runtime_python"):
+        return PackageUpdateStatus(
+            False,
+            "Using the image runtime Python; update that environment outside the generic dependency action.",
+        )
 
     return PackageUpdateStatus(
         True, "Update uses pip in the selected Python environment."
@@ -284,6 +424,9 @@ def _prepend_user_install_bins_to_path() -> None:
         candidates = [os.path.join(site.USER_BASE, "bin")]
     except Exception:
         candidates = []
+    home = os.environ.get("HOME")
+    if home:
+        candidates.append(os.path.join(home, ".local", "bin"))
     candidates.append(os.path.expanduser("~/.local/bin"))
 
     parts = (
@@ -316,6 +459,13 @@ dist_names={{
     'mlx_lm':['mlx-lm'],
     'diffusers':['diffusers','torch'],
     'hf_transfer':['hf-transfer','hf_transfer'],
+    'onnxruntime':['onnxruntime','onnxruntime-directml','onnxruntime-gpu'],
+    'onnxruntime-directml':['onnxruntime-directml'],
+    'onnxruntime-gpu':['onnxruntime-gpu'],
+}}
+import_names={{
+    'onnxruntime-directml':['onnxruntime'],
+    'onnxruntime-gpu':['onnxruntime'],
 }}
 bin_names={{
     'vllm':['vllm'],
@@ -366,16 +516,78 @@ def dist_status(ds):
             pass
     return out
 
+def ort_providers(n, mods):
+    if n not in ('onnxruntime', 'onnxruntime-directml', 'onnxruntime-gpu'):
+        return []
+    if not mods.get('onnxruntime', {{}}).get('real_module'):
+        return []
+    try:
+        import onnxruntime as ort
+        return list(ort.get_available_providers())
+    except Exception:
+        return []
+
 def probe(n):
-    mods = {{n: mod_status(n)}}
+    mods = {{m: mod_status(m) for m in import_names.get(n, [n])}}
     if n == 'diffusers':
         mods['torch'] = mod_status('torch')
     dists = dist_status(dist_names.get(n, [n]))
     bins = {{b: shutil.which(b) for b in bin_names.get(n, [])}}
-    return {{'modules': mods, 'dists': dists, 'binaries': bins}}
+    return {{'modules': mods, 'dists': dists, 'binaries': bins, 'providers': ort_providers(n, mods)}}
 
 print(json.dumps({{n: probe(n) for n in names}}))
 """
+
+
+def _image_runtime_python() -> Path | None:
+    """Return the dedicated image-sidecar interpreter when it is available."""
+    root = Path(BASE_DIR)
+    candidates = [
+        root / ".image-venv" / "Scripts" / "python.exe",
+        root / ".image-venv" / "bin" / "python",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _probe_package_with_python(python_exe: Path, name: str) -> dict | None:
+    """Run the standard package probe under a specific Python interpreter."""
+    try:
+        proc = subprocess.run(
+            [str(python_exe), "-c", _package_probe_script([name])],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        )
+    except Exception:
+        return None
+    if proc.returncode != 0:
+        return None
+    for line in reversed((proc.stdout or "").splitlines()):
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            data = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        probe = data.get(name)
+        if isinstance(probe, dict):
+            probe["runtime_python"] = str(python_exe)
+            return probe
+    return None
+
+
+def _status_note_with_runtime(name: str, probe: dict) -> str:
+    note = _package_status_note(name, probe)
+    runtime_python = probe.get("runtime_python")
+    if runtime_python:
+        runtime_note = f"image runtime: {runtime_python}"
+        return f"{note}; {runtime_note}" if note else runtime_note
+    return note
 
 
 def _find_line_break(buf):
@@ -876,6 +1088,99 @@ def setup_shell_routes() -> APIRouter:
         )
         return result
 
+    @router.post("/api/android/adb-pc/connect")
+    async def android_adb_pc_connect(request: Request) -> Dict[str, Any]:
+        """Run the checked-in Android ADB reverse helper. Admin only."""
+        _require_admin(request)
+        _reject_cross_site(request)
+        if not IS_WINDOWS:
+            return {
+                "ok": False,
+                "error": "ADB PC setup is currently wired for the Windows desktop helper.",
+            }
+
+        batch = Path(BASE_DIR) / "connect-android-pc.bat"
+        if not batch.exists() or not batch.is_file():
+            return {"ok": False, "error": f"Missing helper: {batch}"}
+
+        env = os.environ.copy()
+        env["ODYSSEUS_NO_PAUSE"] = "1"
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                os.environ.get("ComSpec", "cmd.exe"),
+                "/c",
+                str(batch),
+                cwd=str(BASE_DIR),
+                env=env,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            out, err = await asyncio.wait_for(proc.communicate(), timeout=75)
+        except asyncio.TimeoutError:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            return {"ok": False, "error": "Android ADB PC setup timed out."}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)[-600:]}
+
+        output = out.decode("utf-8", errors="replace")
+        error = err.decode("utf-8", errors="replace")
+        combined = "\n".join(part for part in (output.strip(), error.strip()) if part)
+        if proc.returncode == 0:
+            return {"ok": True, "output": combined[-4000:]}
+        return {
+            "ok": False,
+            "error": (combined or f"Helper exited with code {proc.returncode}")[-4000:],
+        }
+
+    @router.post("/api/android/adb/disconnect-all")
+    async def android_adb_disconnect_all(request: Request) -> Dict[str, Any]:
+        """Disconnect all ADB connections. Admin only."""
+        _require_admin(request)
+        _reject_cross_site(request)
+        if not IS_WINDOWS:
+            return {"ok": False, "error": "ADB disconnect is currently wired for Windows."}
+
+        # Find adb executable (same logic as android-pc-tools.ps1)
+        adb_path = ""
+        cmd = shutil.which("adb")
+        if cmd:
+            adb_path = cmd
+        else:
+            sdk_adb = Path(os.environ.get("LOCALAPPDATA", "")) / "Android" / "Sdk" / "platform-tools" / "adb.exe"
+            if sdk_adb.exists():
+                adb_path = str(sdk_adb)
+        if not adb_path:
+            return {"ok": False, "error": "adb.exe was not found."}
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                adb_path, "disconnect",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            out, err = await asyncio.wait_for(proc.communicate(), timeout=30)
+        except asyncio.TimeoutError:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            return {"ok": False, "error": "ADB disconnect timed out."}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)[-600:]}
+
+        output = out.decode("utf-8", errors="replace").strip()
+        error = err.decode("utf-8", errors="replace").strip()
+        combined = "\n".join(part for part in (output, error) if part)
+        if proc.returncode == 0:
+            return {"ok": True, "output": combined or "All ADB connections disconnected."}
+        return {
+            "ok": False,
+            "error": (combined or f"ADB disconnect exited with code {proc.returncode}")[-4000:],
+        }
+
     @router.post("/api/shell/stream")
     async def shell_stream(request: Request, req: ShellExecRequest):
         """Execute a shell command and stream output line-by-line via SSE. Admin only."""
@@ -1224,10 +1529,46 @@ def setup_shell_routes() -> APIRouter:
             },
             {
                 "name": "rembg",
-                "pip": "rembg[gpu]",
-                "desc": "AI background removal for image editor",
+                "pip": "rembg",
+                "desc": "AI background removal for image editor. Uses the app's separate ONNX Runtime dependency.",
                 "category": "Image",
                 "target": "local",
+            },
+            {
+                "name": "onnxruntime",
+                "pip": "onnxruntime",
+                "desc": "CPU ONNX inference runtime used by rembg and ONNX-backed image tools",
+                "category": "Image",
+                "target": "local",
+                "import_name": "onnxruntime",
+                "dist_names": ["onnxruntime", "onnxruntime-directml", "onnxruntime-gpu"],
+            },
+            {
+                "name": "onnxruntime-directml",
+                "pip": "onnxruntime-directml",
+                "desc": "GPU ONNX Runtime via DirectML for Windows/AMD ONNX-backed image and inpaint tools",
+                "category": "Image",
+                "target": "remote",
+                "import_name": "onnxruntime",
+                "dist_names": ["onnxruntime-directml"],
+            },
+            {
+                "name": "rembg-silueta",
+                "pip": "",
+                "desc": REMBG_MODEL_DEPENDENCIES["silueta"]["desc"],
+                "category": "Image",
+                "target": "local",
+                "kind": "file",
+                "model": "silueta",
+            },
+            {
+                "name": "rembg-isnet-general-use",
+                "pip": "",
+                "desc": REMBG_MODEL_DEPENDENCIES["isnet-general-use"]["desc"],
+                "category": "Image",
+                "target": "local",
+                "kind": "file",
+                "model": "isnet-general-use",
             },
             {
                 "name": "realesrgan",
@@ -1382,6 +1723,8 @@ def setup_shell_routes() -> APIRouter:
             if sys.platform == "darwin":
                 target_os_id = "macos"
 
+        image_runtime_python = None if host else _image_runtime_python()
+
         for pkg in packages:
             on_remote = bool(host and pkg.get("target") == "remote")
             probe = None
@@ -1409,6 +1752,27 @@ def setup_shell_routes() -> APIRouter:
                     )
                 else:
                     pkg["installed"] = shutil.which(pkg["name"]) is not None
+            elif pkg.get("kind") == "file":
+                installed, status_note = _rembg_model_status(pkg.get("model") or "")
+                pkg["installed"] = installed
+                if status_note:
+                    pkg["status_note"] = status_note
+            elif (
+                image_runtime_python
+                and pkg["name"] in IMAGE_RUNTIME_PACKAGE_NAMES
+                and (
+                    runtime_probe := _probe_package_with_python(
+                        image_runtime_python, pkg["name"]
+                    )
+                )
+                and _package_installed_from_probe(pkg["name"], runtime_probe)
+            ):
+                probe = runtime_probe
+                pkg["installed"] = True
+                pkg["details"] = probe
+                note = _status_note_with_runtime(pkg["name"], probe)
+                if note:
+                    pkg["status_note"] = note
             elif pkg["name"] == "llama_cpp" and shutil.which("llama-server"):
                 pkg["installed"] = True
                 pkg["status_note"] = (
@@ -1431,10 +1795,47 @@ def setup_shell_routes() -> APIRouter:
                         "dists": {"vllm": _vllm_version} if _vllm_version else {},
                     }
                     pkg["status_note"] = _package_status_note("vllm", probe)
+            elif pkg["name"] in {"onnxruntime", "onnxruntime-directml", "onnxruntime-gpu"}:
+                try:
+                    ort = importlib.import_module("onnxruntime")
+                    providers = []
+                    try:
+                        providers = list(ort.get_available_providers())
+                    except Exception:
+                        providers = []
+                    dists = {}
+                    for dist_name in _pip_dist_names(pkg):
+                        try:
+                            dists[dist_name] = importlib_metadata.version(dist_name)
+                        except importlib_metadata.PackageNotFoundError:
+                            pass
+                    probe = {
+                        "modules": {"onnxruntime": {"found": True, "real_module": True}},
+                        "dists": dists,
+                        "providers": providers,
+                        "binaries": {},
+                    }
+                    pkg["installed"] = _package_installed_from_probe(pkg["name"], probe)
+                    note = _package_status_note(pkg["name"], probe)
+                    if note:
+                        pkg["status_note"] = note
+                except ImportError:
+                    pkg["installed"] = False
+                except Exception:
+                    pkg["installed"] = False
             else:
                 try:
-                    _import_optional_dependency_for_status(pkg["name"])
-                    importlib_metadata.version(_pip_dist_name(pkg))
+                    importlib.import_module(pkg.get("import_name") or pkg["name"])
+                    found_dist = False
+                    for dist_name in _pip_dist_names(pkg):
+                        try:
+                            importlib_metadata.version(dist_name)
+                            found_dist = True
+                            break
+                        except importlib_metadata.PackageNotFoundError:
+                            pass
+                    if not found_dist:
+                        raise importlib_metadata.PackageNotFoundError
                     pkg["installed"] = True
                 except ImportError:
                     pkg["installed"] = False
@@ -1582,6 +1983,7 @@ def setup_shell_routes() -> APIRouter:
             return {"ok": False, "error": "No package specified"}
         # Validate against known packages to prevent arbitrary pip install
         known = {
+            "rembg",
             "rembg[gpu]",
             "hf_transfer",
             "llama-cpp-python[server]",
@@ -1596,6 +1998,7 @@ def setup_shell_routes() -> APIRouter:
             "realesrgan",
             "gfpgan",
             "insightface",
+            "onnxruntime-directml",
             "onnxruntime-gpu",
             "onnxruntime",
             "hdbscan",
@@ -1613,126 +2016,19 @@ def setup_shell_routes() -> APIRouter:
             return {"ok": True, "output": stdout.decode()[-200:]}
         return {"ok": False, "error": stderr.decode()[-300:]}
 
-    @router.post("/api/cookbook/install-system-deps")
-    async def install_system_deps(request: Request):
-        """Install OS-level system packages (cmake/build-essential/git/tmux)
-        on a remote target or in the local container. Admin only.
-
-        Bounded by a per-package allowlist — anything outside the catalog
-        is rejected so the route can't be coerced into installing arbitrary
-        OS packages. Uses `sudo -n` (passwordless) so the call returns a
-        clear "needs sudo password" error instead of hanging when interactive
-        sudo is required.
-        """
+    @router.post("/api/cookbook/rembg-models/install")
+    async def install_rembg_model(request: Request):
+        """Download an allow-listed rembg ONNX model into rembg's model cache."""
         _require_admin(request)
+        _reject_cross_site(request)
         body = await request.json()
-        raw = body.get("packages") or []
-        host = (body.get("remote_host") or "").strip()
-        ssh_port = body.get("ssh_port")
-        # Names users can request — must match canonical names used in the
-        # deps catalog's `system_prereqs` field and on the System rows.
-        ALLOWED = {"cmake", "build-essential", "g++", "gcc", "git", "tmux", "make"}
-        pkgs = [str(p).strip() for p in raw if str(p).strip() in ALLOWED]
-        if not pkgs:
-            return {"ok": False, "error": "no installable packages requested (allowlist: " + ", ".join(sorted(ALLOWED)) + ")"}
-        # Re-map to the right package name per OS. apt/dpkg use the names
-        # as-is; pacman has base-devel for build-essential, etc.
-        def _apt(names): return list(names)
-        def _pacman(names):
-            return ["base-devel" if n == "build-essential" else n for n in names]
-        def _dnf(names):
-            out = []
-            for n in names:
-                if n == "build-essential": out += ["gcc", "gcc-c++", "make"]
-                elif n == "g++": out += ["gcc-c++"]
-                else: out.append(n)
-            return out
-        def _apk(names):
-            out = []
-            for n in names:
-                if n == "build-essential": out.append("build-base")
-                else: out.append(n)
-            return out
-        def _zypper(names):
-            out = []
-            for n in names:
-                if n == "build-essential": out += ["gcc-c++", "make"]
-                elif n == "g++": out.append("gcc-c++")
-                else: out.append(n)
-            return out
-        def _brew(names):
-            return [n for n in names if n not in ("build-essential", "g++", "gcc", "make")]
-        # Build a single shell snippet that detects the package manager and
-        # runs the right install. Non-interactive sudo (-n) only — if sudo
-        # asks for a password the script reports it instead of hanging.
-        apt_pkgs = " ".join(shlex.quote(p) for p in _apt(pkgs))
-        pac_pkgs = " ".join(shlex.quote(p) for p in _pacman(pkgs))
-        dnf_pkgs = " ".join(shlex.quote(p) for p in _dnf(pkgs))
-        apk_pkgs = " ".join(shlex.quote(p) for p in _apk(pkgs))
-        zypper_pkgs = " ".join(shlex.quote(p) for p in _zypper(pkgs))
-        brew_pkgs = " ".join(shlex.quote(p) for p in _brew(pkgs))
-        # Error messages go to stderr (>&2) so the route's error field
-        # gets populated. Without the redirect, `echo "ERROR…"` on stdout
-        # left stderr empty and the frontend toast fell through to a
-        # bare "HTTP 200" instead of surfacing the real reason.
-        script = (
-            'set -e; '
-            'BREW="$(command -v brew 2>/dev/null || true)"; '
-            'if [ -z "$BREW" ] && [ -x /opt/homebrew/bin/brew ]; then BREW=/opt/homebrew/bin/brew; fi; '
-            'if [ -z "$BREW" ] && [ -x /usr/local/bin/brew ]; then BREW=/usr/local/bin/brew; fi; '
-            'if [ -n "$BREW" ]; then '
-            f'  if [ -z "{brew_pkgs}" ]; then echo "Nothing to install with brew for requested packages." >&2; exit 4; fi; "$BREW" install {brew_pkgs}; exit $?; '
-            'fi; '
-            'if [ "$(id -u)" = "0" ]; then SUDO=""; '
-            'elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then SUDO="sudo -n"; '
-            'else '
-            '  echo "ERROR: this target needs sudo for its OS package manager, but passwordless sudo is unavailable. Open a terminal on the target and run the shown install command once, then retry in Cookbook." >&2; exit 2; fi; '
-            'if command -v apt-get >/dev/null 2>&1; then '
-            f'  $SUDO env DEBIAN_FRONTEND=noninteractive apt-get update -qq && $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends {apt_pkgs}; '
-            'elif command -v pacman >/dev/null 2>&1; then '
-            f'  $SUDO pacman -Sy --needed --noconfirm {pac_pkgs}; '
-            'elif command -v dnf >/dev/null 2>&1; then '
-            f'  $SUDO dnf install -y {dnf_pkgs}; '
-            'elif command -v apk >/dev/null 2>&1; then '
-            f'  $SUDO apk add --no-interactive {apk_pkgs}; '
-            'elif command -v zypper >/dev/null 2>&1; then '
-            f'  $SUDO zypper --non-interactive install {zypper_pkgs}; '
-            'else '
-            '  echo "ERROR: no supported package manager (apt/pacman/dnf/apk/zypper/brew) on this target." >&2; exit 3; fi'
-        )
+        model = str(body.get("model") or "").strip()
+        if model not in REMBG_MODEL_DEPENDENCIES:
+            return {"ok": False, "error": f"Unknown rembg model: {model}"}
         try:
-            if host:
-                argv = _ssh_base_argv(host, ssh_port) + [script]
-            else:
-                argv = ["bash", "-lc", script]
-        except ValueError as e:
-            raise HTTPException(400, str(e))
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-            )
-            out, err = await asyncio.wait_for(proc.communicate(), timeout=180)
-        except asyncio.TimeoutError:
-            return {"ok": False, "error": "Install timed out after 180s"}
-        ok = (proc.returncode == 0)
-        # Combine stderr + (last lines of stdout) into a single error
-        # blob when ok=False — some package managers print useful failure
-        # context to stdout, and a script that exits via `echo ...; exit N`
-        # without `>&2` would otherwise hand back an empty error string
-        # and force the frontend to show a bare "HTTP 200".
-        err_txt = err.decode("utf-8", errors="replace").strip()
-        out_txt = out.decode("utf-8", errors="replace").strip()
-        if not ok:
-            tail_out = out_txt[-500:] if out_txt else ""
-            combined = err_txt or tail_out or f"exit code {proc.returncode}"
-        else:
-            combined = None
-        return {
-            "ok": ok,
-            "exit_code": proc.returncode,
-            "output": out_txt[-1000:],
-            "error": combined,
-        }
+            return await asyncio.to_thread(_download_rembg_model, model)
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)[-300:]}
 
     @router.post("/api/cookbook/rebuild-engine")
     async def rebuild_engine(request: Request):

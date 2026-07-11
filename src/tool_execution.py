@@ -16,6 +16,7 @@ import os
 import pathlib
 import re
 import sys
+import tempfile
 import time
 from typing import Any, Awaitable, Callable, Dict, Optional, Tuple
 
@@ -90,7 +91,11 @@ def _is_sensitive_path(resolved: str) -> bool:
     the lowercase form, so a case-sensitive check would let it slip past the
     deny-list in every file tool that relies on it.
     """
-    parts = [p.casefold() for p in resolved.split(os.sep)]
+    # Accept both separator styles.  Model-supplied paths and persisted tool
+    # arguments can use POSIX separators even when the server runs on Windows;
+    # splitting only on ``os.sep`` would make ``/home/u/.ssh/id_rsa`` a single
+    # component there and bypass the deny-list helper.
+    parts = [p.casefold() for p in re.split(r"[\\/]+", str(resolved)) if p]
     filename = parts[-1] if parts else ""
 
     # Check if any path component is a sensitive directory.
@@ -122,6 +127,11 @@ def _tool_path_roots() -> list[str]:
     except OSError:
         pass
 
+    # Native system temp directory.  On Windows pytest, subprocesses, and the
+    # app itself use %TEMP% (normally C:\\Users\\...\\Temp), which is unrelated
+    # to the drive-relative ``/tmp`` spelling above.
+    roots.append(tempfile.gettempdir())
+
     # $TMPDIR — per-user temp root on macOS (e.g. /var/folders/.../T/).
     tmpdir = os.environ.get("TMPDIR")
     if tmpdir:
@@ -144,9 +154,10 @@ def _tool_path_roots() -> list[str]:
             real = os.path.realpath(r)
         except OSError:
             continue
-        if real in seen:
+        identity = os.path.normcase(real)
+        if identity in seen:
             continue
-        seen.add(real)
+        seen.add(identity)
         out.append(real)
     return out
 
@@ -180,14 +191,16 @@ def _resolve_tool_path(raw_path: str) -> str:
             f"(e.g. .ssh, .gnupg) or matches a sensitive filename"
         )
 
+    normalized_resolved = os.path.normcase(resolved)
     for root in _tool_path_roots():
-        if resolved == root:
+        normalized_root = os.path.normcase(root)
+        if normalized_resolved == normalized_root:
             return resolved
         try:
-            common = os.path.commonpath([resolved, root])
+            common = os.path.commonpath([normalized_resolved, normalized_root])
         except ValueError:
             continue
-        if common == root:
+        if common == normalized_root:
             return resolved
     raise ValueError(
         f"path '{raw_path}' is outside the allowed roots"
@@ -336,7 +349,6 @@ _MCP_TOOL_MAP = {
     "write_file":     ("filesystem", "write_file"),
     "web_search":     ("web_search", "web_search"),
     "web_fetch":      ("web_fetch",  "web_fetch"),
-    "generate_image": ("image_gen",  "generate_image"),
 }
 _EMAIL_MCP_OWNER_ARG = "_odysseus_owner"
 
@@ -415,19 +427,16 @@ _MCP_ARG_PARSERS: Dict[str, Callable[[str], Dict[str, str]]] = {
 #
 # IMPORTANT — this only covers the MCP path. _build_mcp_args is reached via
 # _call_mcp_tool only for _MCP_TOOL_MAP tools (so an entry outside that map is
-# dead, as manage_memory was). And of these, only generate_image has a live MCP
-# server today; web_search/web_fetch/read_file/write_file have none, so they run
-# via _direct_fallback -> TOOL_HANDLERS, whose handlers decode JSON themselves
-# (see ReadFileTool/WriteFileTool/WebSearchTool/WebFetchTool). The entries here
-# are kept as defense-in-depth for if/when those servers are added. The live
-# fix for each server-less tool lives in its handler. test_write_file_inline_
-# json_args and test_mcp_json_primary_keys_are_all_live pin both halves.
+# dead, as manage_memory was). Image generation now has its own direct dispatch
+# (including RunComfy routing), so it must not be listed as an MCP JSON-primary
+# tool either. The remaining handlers also decode inline JSON on their direct
+# fallback paths; these entries are defense-in-depth if their MCP servers are
+# connected later.
 _MCP_JSON_PRIMARY_KEYS: Dict[str, tuple] = {
     "web_search":     ("query", "queries"),
     "web_fetch":      ("url",),
     "read_file":      ("path",),
     "write_file":     ("path",),
-    "generate_image": ("prompt",),
 }
 
 
@@ -522,6 +531,7 @@ async def _direct_fallback(
     progress_cb: Optional[Callable[[Dict], Awaitable[None]]] = None,
     session_id: Optional[str] = None,
     owner: Optional[str] = None,
+    upload_handler: Optional[Any] = None,
 ) -> Optional[Dict]:
     _subproc_env = {
         **os.environ,
@@ -537,6 +547,7 @@ async def _direct_fallback(
             "subproc_env": _subproc_env,
             "session_id": session_id,
             "owner": owner,
+            "upload_handler": upload_handler,
         }
 
         from src.agent_tools import TOOL_HANDLERS
@@ -575,6 +586,7 @@ async def execute_tool_block(
     progress_cb: Optional[Callable[[Dict], Awaitable[None]]] = None,
     workspace: Optional[str] = None,
     tool_policy: Optional[Any] = None,
+    upload_handler: Optional[Any] = None,
 ) -> Tuple[str, Dict]:
     """Execute a single tool block. Returns (description, result_dict).
 
@@ -591,6 +603,7 @@ async def execute_tool_block(
             owner=owner,
             progress_cb=progress_cb,
             tool_policy=tool_policy,
+            upload_handler=upload_handler,
         )
         return output
     finally:
@@ -604,6 +617,7 @@ async def _execute_tool_block_impl(
     owner: Optional[str] = None,
     progress_cb: Optional[Callable[[Dict], Awaitable[None]]] = None,
     tool_policy: Optional[Any] = None,
+    upload_handler: Optional[Any] = None,
 ) -> Tuple[str, Dict]:
     """Execute a single tool block. Returns (description, result_dict).
 
@@ -620,7 +634,7 @@ async def _execute_tool_block_impl(
         do_list_downloads, do_cancel_download, do_search_hf_models, do_list_cached_models,
         do_list_serve_presets, do_serve_preset, do_adopt_served_model,
         do_list_cookbook_servers,
-        do_edit_image, do_trigger_research, do_manage_research, do_resolve_contact,
+        do_manage_gallery, do_edit_image, do_trigger_research, do_manage_research, do_resolve_contact,
         do_manage_contact,
         do_vault_search, do_vault_get, do_vault_unlock,
         do_app_api,
@@ -742,7 +756,62 @@ async def _execute_tool_block_impl(
     # Route MCP-extracted tools through the MCP manager. Forward
     # the progress callback so long-running subprocess tools
     # (bash, python) can stream `tool_progress` events to the UI.
-    if tool in _MCP_TOOL_MAP:
+    if tool == "generate_image":
+        from src.ai_interaction import do_generate_image
+        from src.runcomfy_media import generate_runcomfy_media, wants_runcomfy_media
+
+        desc = f"generate_image: {content.split(chr(10))[0][:80]}"
+        used_runcomfy = wants_runcomfy_media(content)
+        if used_runcomfy:
+            result = await generate_runcomfy_media(
+                "image",
+                content,
+                owner=owner,
+                session_id=session_id,
+            )
+        else:
+            result = await do_generate_image(content, session_id, owner=owner)
+        result.setdefault("exit_code", 0 if not result.get("error") else 1)
+    elif tool == "generate_video":
+        from src.runcomfy_media import generate_runcomfy_media
+
+        desc = f"generate_video: {content.split(chr(10))[0][:80]}"
+        result = await generate_runcomfy_media(
+            "video",
+            content,
+            owner=owner,
+            session_id=session_id,
+        )
+    elif tool == "generate_music":
+        from src.runcomfy_media import generate_runcomfy_media
+
+        desc = f"generate_music: {content.split(chr(10))[0][:80]}"
+        result = await generate_runcomfy_media(
+            "music",
+            content,
+            owner=owner,
+            session_id=session_id,
+        )
+    elif tool == "runcomfy_media":
+        from src.runcomfy_media import generate_runcomfy_media
+
+        desc = "runcomfy_media"
+        try:
+            _args = json.loads(content) if content.strip().startswith("{") else {}
+        except (json.JSONDecodeError, TypeError):
+            _args = {}
+        _kind = str(_args.get("media_type") or _args.get("kind") or "image").lower()
+        if _kind in {"audio", "song", "music"}:
+            _kind = "music"
+        elif _kind not in {"image", "video", "music"}:
+            _kind = "image"
+        result = await generate_runcomfy_media(
+            _kind,
+            content,
+            owner=owner,
+            session_id=session_id,
+        )
+    elif tool in _MCP_TOOL_MAP:
         first_line = content.split(chr(10))[0][:80]
         desc = f"{tool}: {first_line}"
         result = await _call_mcp_tool(tool, content, progress_cb=progress_cb)
@@ -851,6 +920,9 @@ async def _execute_tool_block_impl(
     elif tool == "list_cookbook_servers":
         desc = "list_cookbook_servers"
         result = await do_list_cookbook_servers(content, owner=owner)
+    elif tool == "manage_gallery":
+        desc = "manage_gallery"
+        result = await do_manage_gallery(content, owner=owner)
     elif tool == "edit_image":
         desc = "edit_image"
         result = await do_edit_image(content, owner=owner)
@@ -944,7 +1016,14 @@ async def _execute_tool_block_impl(
     elif tool in dynamic_handlers:
         first_line = content.split(chr(10))[0][:80]
         desc = f"registry: {tool} {first_line}".strip()
-        res = await _direct_fallback(tool, content, progress_cb=progress_cb)
+        res = await _direct_fallback(
+            tool,
+            content,
+            progress_cb=progress_cb,
+            session_id=session_id,
+            owner=owner,
+            upload_handler=upload_handler,
+        )
 
         if isinstance(res, tuple):
             desc, result = res
@@ -972,6 +1051,9 @@ _FORMATTER_HANDLED_KEYS = {
     "response", "results", "session_id", "name", "model", "session_name",
     "success", "path", "action", "title", "doc_id", "version", "applied",
     "error", "output",
+    "media_url", "media_id", "media_type", "media_prompt", "media_model", "media_size", "media_quality", "media_files",
+    "image_url", "image_id", "image_prompt", "image_model", "image_size", "image_quality",
+    "item", "items", "total", "description", "vision_model",
 }
 
 

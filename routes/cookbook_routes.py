@@ -55,9 +55,7 @@ from routes.cookbook_helpers import (
     load_stored_hf_token,
     _append_vllm_linux_preflight_lines, _ollama_bind_from_cmd, _pip_install_fallback_chain,
     _pip_install_no_cache, _user_shell_path_bootstrap, _venv_safe_local_pip_install_cmd,
-    _diagnose_serve_output, run_ssh_command_async,
-    _ollama_bind_from_cmd, _pip_install_fallback_chain, _pip_install_no_cache,
-    _user_shell_path_bootstrap, _venv_safe_local_pip_install_cmd,
+    _windows_safe_local_pip_install_cmd, _diagnose_serve_output, run_ssh_command_async,
     _append_pip_install_runner_lines, _pip_install_command_without_break_system_packages,
     _normalize_llama_cpp_python_cache_types,
     ModelDownloadRequest, ServeRequest,
@@ -1909,10 +1907,16 @@ def setup_cookbook_routes() -> APIRouter:
         req.cmd = _normalize_llama_cpp_python_cache_types(req.cmd) or ""
         req.cmd = _normalize_minimax_m3_vllm_cmd(req.cmd)
         req.cmd = _normalize_deepseek_v4_sglang_cmd(req.cmd)
+        local_windows = IS_WINDOWS and not bool(req.remote_host)
         req.cmd = _venv_safe_local_pip_install_cmd(
             req.cmd,
             local=not bool(req.remote_host),
             in_venv=sys.prefix != sys.base_prefix,
+        )
+        req.cmd = _windows_safe_local_pip_install_cmd(
+            req.cmd,
+            local_windows=local_windows,
+            python_executable=sys.executable,
         )
         is_pip_install = bool(req.cmd and "pip install" in req.cmd)
         if is_pip_install:
@@ -2476,11 +2480,23 @@ def setup_cookbook_routes() -> APIRouter:
                 runner_lines.append('fi')
             elif "scripts/diffusion_server.py" in req.cmd or ".diffusion_server.py" in req.cmd:
                 runner_lines.append('export PATH="$HOME/.local/bin:$PATH"')
-                runner_lines.append('if ! ODYSSEUS_DIFFUSION_IMPORT_ERROR="$(python3 -c "import torch, diffusers" 2>&1)"; then')
-                runner_lines.append('  echo "ERROR: Diffusion serving requires PyTorch + diffusers."')
-                runner_lines.append('  printf "%s\\n" "$ODYSSEUS_DIFFUSION_IMPORT_ERROR"')
-                runner_lines.append('  ODYSSEUS_PREFLIGHT_EXIT=127')
-                runner_lines.append('fi')
+                if "--backend onnx" in req.cmd or "DmlExecutionProvider" in req.cmd:
+                    runner_lines.append('if ! ODYSSEUS_DIFFUSION_IMPORT_ERROR="$(python3 -c "import torch, diffusers, onnxruntime; from optimum.onnxruntime import ORTDiffusionPipeline" 2>&1)"; then')
+                    runner_lines.append('  echo "ERROR: ONNX/DirectML diffusion serving requires PyTorch + diffusers + optimum-onnx + onnxruntime-directml."')
+                    runner_lines.append('  printf "%s\\n" "$ODYSSEUS_DIFFUSION_IMPORT_ERROR"')
+                    runner_lines.append('  ODYSSEUS_PREFLIGHT_EXIT=127')
+                    runner_lines.append('elif python3 -c "import onnxruntime as ort; raise SystemExit(0 if \\"DmlExecutionProvider\\" in ort.get_available_providers() else 1)" 2>/dev/null; then')
+                    runner_lines.append('  echo "[odysseus] ONNX Runtime DirectML provider: available"')
+                    runner_lines.append('else')
+                    runner_lines.append('  echo "ERROR: DmlExecutionProvider is not available. Install onnxruntime-directml in the selected environment."')
+                    runner_lines.append('  ODYSSEUS_PREFLIGHT_EXIT=127')
+                    runner_lines.append('fi')
+                else:
+                    runner_lines.append('if ! ODYSSEUS_DIFFUSION_IMPORT_ERROR="$(python3 -c "import torch, diffusers" 2>&1)"; then')
+                    runner_lines.append('  echo "ERROR: Diffusion serving requires PyTorch + diffusers."')
+                    runner_lines.append('  printf "%s\\n" "$ODYSSEUS_DIFFUSION_IMPORT_ERROR"')
+                    runner_lines.append('  ODYSSEUS_PREFLIGHT_EXIT=127')
+                    runner_lines.append('fi')
 
             handled_ollama_sidecar_probe = False
             if (not handled_ollama_serve
@@ -3685,7 +3701,7 @@ def setup_cookbook_routes() -> APIRouter:
                     return {"ok": False, "files": [], "error": f"HF API HTTP {resp.status_code}"}
                 data = resp.json()
         except Exception:
-            logger.exception("HF GGUF file scan failed for %s", repo)
+            logger.exception("HF GGUF file scan failed for %s", repo_id)
             return {"ok": False, "files": [], "error": "HF API request failed"}
         files = [
             str(s.get("rfilename") or "")

@@ -8,7 +8,7 @@ import themeModule from './theme.js';
 import * as Modals from './modalManager.js';
 import spinnerModule from './spinner.js';
 import { registerMenuDismiss, dismissTopMenu, dismissOrRemove } from './escMenuStack.js';
-import { nextToolWindowZ, topToolWindowZ } from './toolWindowZOrder.js';
+import { nextToolWindowZ } from './toolWindowZOrder.js';
 
 let toastEl = null;
 let autoScrollEnabled = true;
@@ -17,7 +17,6 @@ let hoveredToggleWindow = null;
 let hoveredDockChip = null;
 let _lastPointerClientX = null;
 let _lastPointerClientY = null;
-
 // Smooth scroll state
 let _scrollRafId = null;
 let _scrollBox = null;
@@ -234,6 +233,17 @@ export async function copyToClipboard(text) {
   }
 }
 
+function _finishToast(el) {
+  if (!el) return;
+  clearTimeout(el._hideTimer);
+  el._hideTimer = null;
+  el.classList.add('exiting');
+  el.classList.remove('show');
+  el.style.pointerEvents = '';
+  el.querySelector('.toast-progress-bar')
+    ?.classList.remove('toast-progress-bar--running');
+}
+
 // Wire swipe-to-dismiss on the shared toast element. Runs once, the first
 // time a toast is shown. Tracks horizontal touch drag; if the user drags
 // more than DISMISS_PX, the toast slides off in the drag direction and
@@ -279,8 +289,7 @@ function _wireToastSwipe(el) {
       el.style.opacity = '0';
       clearTimeout(el._hideTimer);
       setTimeout(() => {
-        el.classList.remove('show');
-        el.classList.add('exiting');
+        _finishToast(el);
         el.style.transform = '';
         el.style.opacity = '';
       }, 180);
@@ -340,21 +349,30 @@ export function showToast(msg, durationOrOpts) {
     stack.style.cssText = 'display:inline-flex;flex-direction:column;align-items:center;gap:1px;margin-left:10px;line-height:1;';
 
     const btn = document.createElement('button');
+    // If the caller supplied an SVG icon, prepend it. We trust the icon string
+    // (only set internally) — never accept caller-controlled HTML otherwise.
     if (actionIcon) {
       btn.innerHTML = `<span style="display:inline-flex;align-items:center;gap:5px;">${actionIcon}<span></span></span>`;
       btn.querySelector('span span').textContent = actionLabel;
     } else {
       btn.textContent = actionLabel;
     }
+    // The toast itself is `pointer-events: none` so it doesn't block clicks
+    // beneath it. With an action button we need to flip both the toast AND
+    // the button so the user can actually click Undo. The flag is reset on
+    // the next plain showToast / showError call (those overwrite textContent
+    // which strips the button + we clear inline style at the top below).
     btn.style.cssText = 'padding:2px 10px;border:1px solid var(--fg);border-radius:4px;background:none;color:var(--fg);cursor:pointer;font-size:12px;pointer-events:auto;display:inline-flex;align-items:center;';
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
       e.preventDefault();
-      toastEl.classList.remove('show');
+      _finishToast(toastEl);
       onAction();
     });
     stack.appendChild(btn);
 
+    // Keyboard-shortcut hints (Ctrl+Z / ⌘Z) are meaningless on touch devices —
+    // skip them on mobile so the toast just shows the Undo button.
     if (actionHint && window.innerWidth > 768) {
       const hint = document.createElement('span');
       hint.textContent = actionHint;
@@ -363,12 +381,16 @@ export function showToast(msg, durationOrOpts) {
     }
 
     toastEl.appendChild(stack);
+
     toastEl.style.pointerEvents = 'auto';
   } else {
+    // No action — restore the default non-blocking behavior.
     toastEl.style.pointerEvents = '';
   }
 
-  // Close button for all toasts — dismiss without waiting for timeout.
+  // Every toast is explicitly dismissible, including short plain notices.
+  // The button remains independently hit-testable while the surrounding
+  // toast stays non-blocking for clicks on content underneath it.
   const closeBtn = document.createElement('button');
   closeBtn.type = 'button';
   closeBtn.className = 'toast-close-btn';
@@ -378,12 +400,25 @@ export function showToast(msg, durationOrOpts) {
   closeBtn.addEventListener('click', (e) => {
     e.stopPropagation();
     e.preventDefault();
-    clearTimeout(toastEl._hideTimer);
-    toastEl.classList.add('exiting');
-    toastEl.classList.remove('show');
-    toastEl.style.pointerEvents = '';
+    _finishToast(toastEl);
   });
   toastEl.appendChild(closeBtn);
+
+  // ── Toast progress bar ──
+  // Animate a thin bar that shrinks over the toast lifetime, giving a
+  // clear visual countdown. We set a CSS custom property so the bar
+  // animates from 100%→0% over `duration`ms via a single transition.
+  let progressBar = toastEl.querySelector('.toast-progress-bar');
+  if (!progressBar) {
+    progressBar = document.createElement('div');
+    progressBar.className = 'toast-progress-bar';
+    toastEl.appendChild(progressBar);
+  }
+  // Reset animation: remove, force reflow, re-add the running class
+  progressBar.classList.remove('toast-progress-bar--running');
+  void progressBar.offsetWidth; // force reflow
+  progressBar.style.setProperty('--toast-duration', duration + 'ms');
+  progressBar.classList.add('toast-progress-bar--running');
 
   // Pin to top-right via CSS — clear any legacy inline overrides so the
   // slide-in-from-right / slide-out-to-left transition can run cleanly.
@@ -393,17 +428,8 @@ export function showToast(msg, durationOrOpts) {
   toastEl.classList.add('show');
   clearTimeout(toastEl._hideTimer);
   toastEl._hideTimer = setTimeout(() => {
-    // Add `exiting` so the CSS rule slides it off to the LEFT instead of
-    // back to the right (where it came from). We piggyback on the same
-    // .toast base; .exiting overrides the resting transform.
-    toastEl.classList.add('exiting');
-    toastEl.classList.remove('show');
-    // Reset pointer-events so an action-toast (which sets it to 'auto'
-    // for its clickable button) doesn't leave the toast intercepting
-    // clicks after it's slid away. Was previously only cleared on the
-    // NEXT plain toast, so a lingering action-toast could appear to
-    // "lock" interaction near the top-right.
-    toastEl.style.pointerEvents = '';
+    // .exiting makes the toast leave to the opposite side from its entrance.
+    _finishToast(toastEl);
   }, duration);
 }
 
@@ -415,18 +441,7 @@ export function showError(msg) {
     toastEl = document.getElementById('toast');
   }
   _wireToastSwipe(toastEl);
-  toastEl.textContent = '';
-  toastEl.classList.add('error');
-  toastEl.style.left = '';
-  toastEl.style.transform = '';
-  toastEl.classList.remove('exiting');
-  toastEl.classList.add('show');
-  clearTimeout(toastEl._hideTimer);
-
-  const textSpan = document.createElement('span');
-  textSpan.textContent = msg;
-  toastEl.appendChild(textSpan);
-
+  toastEl.textContent = msg;
   const closeBtn = document.createElement('button');
   closeBtn.type = 'button';
   closeBtn.className = 'toast-close-btn';
@@ -436,17 +451,20 @@ export function showError(msg) {
   closeBtn.addEventListener('click', (e) => {
     e.stopPropagation();
     e.preventDefault();
-    clearTimeout(toastEl._hideTimer);
-    toastEl.classList.add('exiting');
-    toastEl.classList.remove('show');
-    toastEl.style.pointerEvents = '';
+    _finishToast(toastEl);
   });
   toastEl.appendChild(closeBtn);
-
+  toastEl.classList.add('error');
+  // A previous action toast may have enabled hit testing inline.
+  toastEl.style.pointerEvents = '';
+  toastEl.style.left = '';
+  toastEl.style.transform = '';
+  toastEl.classList.remove('exiting');
+  toastEl.classList.add('show');
+  clearTimeout(toastEl._hideTimer);
   toastEl._hideTimer = setTimeout(() => {
-    toastEl.classList.add('exiting');
-    toastEl.classList.remove('show');
-  }, 6000);
+    _finishToast(toastEl);
+  }, 3000);
 }
 
 /**
@@ -793,6 +811,102 @@ export function isTouchInsideModal() {
   return _touchInsideModal;
 }
 
+function _sheetGrabContentFromPointEvent(e) {
+  const content = e.target?.closest?.('.modal-content') || e.target?.closest?.('#theme-popup');
+  if (!content) return null;
+  if (e.target?.closest?.('button, input, select, textarea, a, label, [contenteditable="true"], [contenteditable=""]')) {
+    return null;
+  }
+  const r = content.getBoundingClientRect();
+  if (!r || !r.width || !r.height) return null;
+  const y = e.clientY - r.top;
+  const xFromCenter = Math.abs(e.clientX - (r.left + r.width / 2));
+  const inGrabPillHitZone = y >= 0 && y <= 34 && xFromCenter <= 92;
+  if (!inGrabPillHitZone) return null;
+  const compactSheet = window.innerWidth <= 768
+    || (r.width >= Math.min(window.innerWidth - 24, 760)
+      && r.bottom >= window.innerHeight - 8
+      && r.height >= window.innerHeight * 0.5);
+  return compactSheet ? content : null;
+}
+
+function _minimizeOrHideSheetContent(content) {
+  if (!content) return false;
+  const modal = content.closest('.modal');
+  if (!modal || modal.classList.contains('hidden')) return false;
+  const id = modal.id || '';
+  if (id) {
+    try {
+      if (Modals.minimize(id)) return true;
+    } catch (_) {}
+  }
+  modal.classList.add('hidden');
+  modal.style.display = '';
+  content.classList.remove('sheet-ready', 'modal-closing');
+  content.style.transform = '';
+  content.style.transition = '';
+  content.style.animation = '';
+  try { window.dispatchEvent(new CustomEvent('modal-dismissed', { detail: { id } })); } catch (_) {}
+  return true;
+}
+
+// Compact sheets expose a centered grab pill. Dragging it still starts the
+// swipe gesture; a plain tap/click now hides the sheet instead of doing nothing.
+(function _initSheetGrabClickToHide() {
+  let active = null;
+  let suppressClickUntil = 0;
+
+  document.addEventListener('pointerdown', (e) => {
+    const content = _sheetGrabContentFromPointEvent(e);
+    if (!content) return;
+    active = {
+      content,
+      pointerId: e.pointerId,
+      startX: e.clientX,
+      startY: e.clientY,
+      moved: false,
+    };
+  }, true);
+
+  document.addEventListener('pointermove', (e) => {
+    if (!active || e.pointerId !== active.pointerId) return;
+    if (Math.abs(e.clientX - active.startX) > 6 || Math.abs(e.clientY - active.startY) > 6) {
+      active.moved = true;
+    }
+  }, true);
+
+  const finish = (e) => {
+    if (!active || e.pointerId !== active.pointerId) return;
+    const tap = e.type === 'pointerup'
+      && !active.moved
+      && Math.hypot(e.clientX - active.startX, e.clientY - active.startY) <= 6;
+    const content = active.content;
+    active = null;
+    if (!tap) return;
+    if (_minimizeOrHideSheetContent(content)) {
+      suppressClickUntil = Date.now() + 500;
+      e.preventDefault();
+      e.stopPropagation();
+    }
+  };
+  document.addEventListener('pointerup', finish, true);
+  document.addEventListener('pointercancel', finish, true);
+
+  document.addEventListener('click', (e) => {
+    if (Date.now() < suppressClickUntil) {
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
+    const content = _sheetGrabContentFromPointEvent(e);
+    if (!content) return;
+    if (_minimizeOrHideSheetContent(content)) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+  }, true);
+})();
+
 // Close floating dropdowns/popups on scroll to prevent them drifting
 function _initScrollDismiss() {
   const chatHistory = document.getElementById('chat-history');
@@ -853,7 +967,8 @@ const uiModule = {
   esc,
   isTouchInsideModal,
   emptyStateIcon,
-  registerMenuDismiss
+  registerMenuDismiss,
+  particleBurst
 };
 
 export default uiModule;
@@ -905,6 +1020,7 @@ if ('ontouchstart' in window) {
   let _velocity = 0;
   let _dragging = false;    // true once we've committed to a vertical drag
   let _cancelled = false;   // true if horizontal movement detected
+  let _startedInGrabTapZone = false;
 
   // Close any floating dropdowns/menus that hang off body via position:fixed.
   // Called when a swipe-dismiss gesture starts so the menu doesn't orphan over
@@ -962,10 +1078,22 @@ if ('ontouchstart' in window) {
     _velocity = 0;
     _dragging = false;
     _cancelled = false;
+    _startedInGrabTapZone = _sheetGrabContentFromPointEvent({
+      target: e.target,
+      clientX: touch.clientX,
+      clientY: touch.clientY,
+    }) === content;
   }, { passive: true });
 
   document.addEventListener('touchmove', (e) => {
     if (!_swipeTarget || _cancelled) return;
+    if (window._modalWindowDragging) {
+      _swipeTarget.style.transform = '';
+      _swipeTarget = null;
+      _cancelled = true;
+      _startedInGrabTapZone = false;
+      return;
+    }
     const touch = e.touches[0];
     const dx = Math.abs(touch.clientX - _startX);
     const dy = touch.clientY - _startY;
@@ -976,6 +1104,7 @@ if ('ontouchstart' in window) {
         _swipeTarget.style.transform = '';
         _swipeTarget = null;
         _cancelled = true;
+        _startedInGrabTapZone = false;
         return;
       }
       if (Math.abs(dy) > 8) {
@@ -994,6 +1123,7 @@ if ('ontouchstart' in window) {
           _swipeTarget.style.transform = '';
           _swipeTarget = null;
           _cancelled = true;
+          _startedInGrabTapZone = false;
           return;
         }
         // If swiping up and modal-content itself is scrollable, let native handle it
@@ -1001,6 +1131,7 @@ if ('ontouchstart' in window) {
           _swipeTarget.style.transform = '';
           _swipeTarget = null;
           _cancelled = true;
+          _startedInGrabTapZone = false;
           return;
         }
         // If swiping down but content isn't at the top, let native scroll
@@ -1008,6 +1139,7 @@ if ('ontouchstart' in window) {
           _swipeTarget.style.transform = '';
           _swipeTarget = null;
           _cancelled = true;
+          _startedInGrabTapZone = false;
           return;
         }
         _dragging = true;
@@ -1043,11 +1175,20 @@ if ('ontouchstart' in window) {
 
   document.addEventListener('touchend', (e) => {
     if (!_swipeTarget || !_dragging) {
+      const el = _swipeTarget;
+      const touch = e.changedTouches?.[0] || null;
+      const endX = touch?.clientX ?? _startX;
+      const endY = touch?.clientY ?? _lastY ?? _startY;
+      const isGrabTap = !!(el && _startedInGrabTapZone && !_cancelled
+        && Math.hypot(endX - _startX, endY - _startY) <= 6);
       _swipeTarget = null;
+      _startedInGrabTapZone = false;
+      if (isGrabTap) _minimizeOrHideSheetContent(el);
       return;
     }
     const el = _swipeTarget;
     _swipeTarget = null;
+    _startedInGrabTapZone = false;
 
     const dy = _lastY - _startY;
     const shouldDismiss = dy > DISMISS_THRESHOLD || (dy > 20 && _velocity > VELOCITY_THRESHOLD);
@@ -1200,22 +1341,16 @@ if (!window._odyEscExpandGuard) {
   // research get re-appended on each open). Result: opening compare AFTER
   // cookbook can render compare UNDER it. Bumping the z-index on every
   // open guarantees most-recently-opened wins both visually AND for ESC.
-  let _zCounter = 1000;
   const _isVisible = (m) => !m.classList.contains('hidden') && getComputedStyle(m).display !== 'none';
   const _promote = (m) => {
     if (!m?.classList?.contains('modal') || !_isVisible(m)) return;
     // Re-entry guard: setting style.zIndex itself fires the observer that
     // calls us back. Skip if this element is already pinned to the top
     // (matches the current counter) so we don't spin into an infinite loop.
-    const cur = parseInt(getComputedStyle(m).zIndex, 10) || 0;
-    if (cur === _zCounter && cur > topToolWindowZ({ exclude: m })) return;
-    const z = nextToolWindowZ({
-      exclude: m,
-      current: cur,
-      floor: _zCounter,
-    });
-    _zCounter = Math.max(_zCounter, z);
-    if (z !== cur) m.style.setProperty('z-index', String(z), 'important');
+    const cur = parseInt(m.style.zIndex, 10) || 0;
+    const z = nextToolWindowZ({ exclude: m, current: cur, floor: 1000 });
+    if (cur === z) return;
+    m.style.setProperty('z-index', String(z), 'important');
   };
   new MutationObserver((muts) => {
     for (const m of muts) {
@@ -1308,4 +1443,45 @@ if (!window._odyEscExpandGuard) {
     if (closeBtn) { try { closeBtn.click(); } catch {} }
     else { try { topModal.classList.add('hidden'); } catch {} }
   }, true);
+}
+
+// ── Send button particle burst ──
+// Spawns a brief shower of colored dots from a source element,
+// typically the send button, as a satisfying micro-interaction.
+export function particleBurst(sourceEl) {
+  if (!sourceEl) return;
+  if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return;
+  const rect = sourceEl.getBoundingClientRect();
+  const cx = rect.left + rect.width / 2;
+  const cy = rect.top + rect.height / 2;
+  const colors = [
+    'var(--accent)', 'var(--brand-color, #ff6b6b)', '#ffd93d',
+    '#6bcb77', '#4d96ff', '#ff922b', '#cc5de8', '#20c997'
+  ];
+  const fragment = document.createDocumentFragment();
+  const count = 14;
+
+  for (let i = 0; i < count; i++) {
+    const dot = document.createElement('span');
+    const angle = (Math.PI * 2 * i) / count + (Math.random() - 0.5) * 0.5;
+    const distance = 28 + Math.random() * 44;
+    const size = 3 + Math.random() * 4;
+    const tx = Math.cos(angle) * distance;
+    const ty = Math.sin(angle) * distance;
+    const color = colors[Math.floor(Math.random() * colors.length)];
+    const duration = 400 + Math.random() * 300;
+
+    dot.style.cssText = `
+      position:fixed; left:${cx}px; top:${cy}px;
+      width:${size}px; height:${size}px; border-radius:50%;
+      background:${color}; pointer-events:none; z-index:99999;
+      opacity:1; margin-left:-${size / 2}px; margin-top:-${size / 2}px;
+      animation: particle-burst ${duration}ms cubic-bezier(0, 0.7, 0.3, 1) forwards;
+      --tx:${tx}px; --ty:${ty}px;
+    `;
+    fragment.appendChild(dot);
+
+    dot.addEventListener('animationend', () => dot.remove());
+  }
+  document.body.appendChild(fragment);
 }

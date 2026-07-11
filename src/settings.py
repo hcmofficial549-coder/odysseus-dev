@@ -108,15 +108,7 @@ DEFAULT_SETTINGS = {
     # Tune via Settings or by editing data/settings.json.
     "research_run_timeout_seconds": 1800,
     "agent_max_tool_calls": 0,
-    "agent_max_rounds": 20,  # per-message agent step cap (clamped 1..200)
-    # Soft input-token budget for the agent loop. The DEFAULT value (6000) is the
-    # "auto" sentinel: it means "scale the budget to the model's context window"
-    # (#1230) — so long-context models aren't capped at 6000. Set ANY OTHER value
-    # to enforce an explicit cap (clamped to the window only — hard_max does not
-    # apply to explicit budgets, #1230); set 0 to disable soft-trimming. The
-    # default is treated as auto because the settings-save path materializes
-    # defaults, so a persisted 6000 can't be told apart from a deliberate 6000 —
-    # to pin a budget near the default, use a nearby value (e.g. 5999).
+    "agent_max_rounds": 0,  # per-message agent step cap; 0 = unlimited
     "agent_input_token_budget": 6000,
     # Ceiling on the *auto-derived* input budget; a configurable setting since #1273
     # (the merged #1230 left it a module constant). No effect on an explicit budget
@@ -214,6 +206,20 @@ DEFAULT_FEATURES = {
 
 # ── Settings (data/settings.json) ──
 
+_LEGACY_AGENT_ROUND_CAPS = {20, 50}
+
+
+def _normalize_loaded_settings(settings: dict) -> dict:
+    """Apply small compatibility migrations to loaded settings."""
+    try:
+        round_cap = int(settings.get("agent_max_rounds", 0))
+    except (TypeError, ValueError):
+        return settings
+    if round_cap in _LEGACY_AGENT_ROUND_CAPS:
+        settings["agent_max_rounds"] = 0
+    return settings
+
+
 def load_settings() -> dict:
     """Load settings merged with defaults. Always returns a complete dict."""
     global _settings_cache
@@ -228,6 +234,7 @@ def load_settings() -> dict:
         merged = {**DEFAULT_SETTINGS, **saved}
     except (FileNotFoundError, PermissionError, json.JSONDecodeError, ValueError):
         merged = dict(DEFAULT_SETTINGS)
+    merged = _normalize_loaded_settings(merged)
     _settings_cache = (now, merged)
     return merged
 

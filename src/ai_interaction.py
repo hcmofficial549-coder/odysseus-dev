@@ -17,9 +17,11 @@ through the standard agent_tools.py pipeline.
 import asyncio
 import json
 import logging
+import re
 import uuid
 import time
 from typing import Dict, Optional, Tuple
+from urllib.parse import quote, urlparse
 
 from src.constants import GENERATED_IMAGES_DIR
 
@@ -28,6 +30,14 @@ logger = logging.getLogger(__name__)
 AI_CHAT_TIMEOUT = 120  # seconds for a single LLM call
 MAX_DEBATE_ROUNDS = 5
 MAX_PIPELINE_STEPS = 10
+
+GEMINI_IMAGE_MODEL_ALIASES = {
+    "gemini-image-pro": "gemini-3-pro-image",
+    "models/gemini-image-pro": "gemini-3-pro-image",
+    "nano-banana-pro": "gemini-3-pro-image",
+    "gemini-pro-image": "gemini-3-pro-image",
+}
+GEMINI_IMAGE_FALLBACK_MODEL = "gemini-3-pro-image"
 
 # ---------------------------------------------------------------------------
 # Global managers (set from app.py, same pattern as _mcp_manager)
@@ -71,6 +81,64 @@ def set_rag_manager(rag_mgr, personal_docs_mgr=None):
 # ---------------------------------------------------------------------------
 
 from src.endpoint_resolver import build_chat_url, build_headers, build_models_url, resolve_endpoint_runtime
+
+
+def _model_ids_from_endpoint_fields(ep: object, *field_names: str) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for field_name in field_names:
+        raw = getattr(ep, field_name, None)
+        if not raw:
+            continue
+        try:
+            parsed = json.loads(raw) if isinstance(raw, str) else raw
+        except Exception:
+            parsed = raw
+        if isinstance(parsed, str):
+            values = [part.strip() for part in parsed.replace("\n", ",").split(",") if part.strip()]
+        elif isinstance(parsed, (list, tuple, set)):
+            values = [str(item).strip() for item in parsed if str(item or "").strip()]
+        else:
+            values = []
+        for value in values:
+            key = value.lower()
+            if key not in seen:
+                seen.add(key)
+                out.append(value)
+    return out
+
+
+def _canonical_gemini_image_model(model_id: str) -> str:
+    raw = (model_id or "").strip()
+    lowered = raw.lower()
+    return GEMINI_IMAGE_MODEL_ALIASES.get(lowered, raw)
+
+
+def _is_gemini_endpoint(base_or_url: str, ep: object | None = None) -> bool:
+    text = f"{base_or_url or ''} {getattr(ep, 'name', '') if ep else ''}".lower()
+    try:
+        host = (urlparse(base_or_url or "").hostname or "").lower()
+    except Exception:
+        host = ""
+    return "generativelanguage.googleapis.com" in host or "gemini" in text or "google" in text
+
+
+def _is_gemini_image_model(model_id: str) -> bool:
+    model = (model_id or "").strip().lower()
+    model = GEMINI_IMAGE_MODEL_ALIASES.get(model, model)
+    return (
+        "gemini" in model and "image" in model
+    ) or model.startswith("imagen") or model.startswith("models/imagen")
+
+
+def _gemini_image_fallback_for_endpoint(ep: object) -> str:
+    models = _model_ids_from_endpoint_fields(ep, "cached_models", "pinned_models")
+    for model in models:
+        if _is_gemini_image_model(model):
+            return _canonical_gemini_image_model(model)
+    if _is_gemini_endpoint(getattr(ep, "base_url", "") or "", ep):
+        return GEMINI_IMAGE_FALLBACK_MODEL
+    return ""
 
 
 def _resolve_model(spec: str, owner: Optional[str] = None) -> Tuple[str, str, Dict]:
@@ -129,6 +197,7 @@ def _resolve_model(spec: str, owner: Optional[str] = None) -> Tuple[str, str, Di
                     return build_chat_url(base), matched, headers
             else:
                 # OpenAI-compatible and native Ollama: probe the provider's model list.
+                pinned_model_ids = _model_ids_from_endpoint_fields(ep, "pinned_models")
                 try:
                     models_url = build_models_url(base)
                     if models_url:
@@ -146,21 +215,294 @@ def _resolve_model(spec: str, owner: Optional[str] = None) -> Tuple[str, str, Di
                     else:
                         model_ids = json.loads(ep.cached_models or "[]")
                 except Exception:
-                    model_ids = []
+                    try:
+                        model_ids = json.loads(ep.cached_models or "[]")
+                    except Exception:
+                        model_ids = []
+                if not model_ids:
+                    model_ids = _model_ids_from_endpoint_fields(ep, "cached_models")
+                model_ids = [str(mid) for mid in model_ids if str(mid or "").strip()]
+                for pinned in pinned_model_ids:
+                    if pinned.lower() not in {mid.lower() for mid in model_ids}:
+                        model_ids.append(pinned)
 
                 # Exact match first
                 for mid in model_ids:
                     if mid.lower() == model_name.lower():
                         return build_chat_url(base), mid, headers
 
-                # Partial match
+                # Partial match — word-boundary aware to avoid false positives
+                # e.g. "gpt-5" matches "gpt-5-mini" but NOT "qwen-gpt-5.1-instruct"
+                _escaped = re.escape(model_name.lower())
+                _boundary_re = re.compile(r'(?:^|[-_/: ])' + _escaped + r'(?:$|[-_/: ])')
                 for mid in model_ids:
-                    if model_name.lower() in mid.lower() or mid.lower() in model_name.lower():
+                    if _boundary_re.search(mid.lower()) or mid.lower() in model_name.lower():
                         return build_chat_url(base), mid, headers
+
+                if _is_gemini_endpoint(base, ep) and _is_gemini_image_model(model_name):
+                    return build_chat_url(base), _canonical_gemini_image_model(model_name), headers
 
         raise ValueError(f"Model '{spec}' not found on any configured endpoint")
     finally:
         db.close()
+
+
+def _cached_models_for_hint(owner: Optional[str] = None) -> list[tuple[object, list[str]]]:
+    from src.database import SessionLocal, ModelEndpoint
+    from src.auth_helpers import owner_filter
+
+    db = SessionLocal()
+    try:
+        query = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True)
+        if owner:
+            query = owner_filter(query, ModelEndpoint, owner)
+        rows: list[tuple[object, list[str]]] = []
+        for ep in query.all():
+            models = _model_ids_from_endpoint_fields(ep, "cached_models", "pinned_models")
+            rows.append((ep, models))
+        return rows
+    finally:
+        db.close()
+
+
+def _best_cached_model(
+    rows: list[tuple[object, list[str]]],
+    *,
+    endpoint_terms: tuple[str, ...] = (),
+    include_terms: tuple[str, ...] = (),
+    prefer_terms: tuple[str, ...] = (),
+    avoid_terms: tuple[str, ...] = (),
+) -> str:
+    best: tuple[int, str] | None = None
+    endpoint_terms_l = tuple(term.lower() for term in endpoint_terms)
+    include_terms_l = tuple(term.lower() for term in include_terms)
+    prefer_terms_l = tuple(term.lower() for term in prefer_terms)
+    avoid_terms_l = tuple(term.lower() for term in avoid_terms)
+
+    for ep, models in rows:
+        endpoint_text = f"{getattr(ep, 'name', '')} {getattr(ep, 'base_url', '')}".lower()
+        if endpoint_terms_l and not any(term in endpoint_text for term in endpoint_terms_l):
+            continue
+        for model in models:
+            model_l = model.lower()
+            if include_terms_l and not any(term in model_l for term in include_terms_l):
+                continue
+            score = 10
+            score += sum(5 for term in prefer_terms_l if term in model_l)
+            score -= sum(4 for term in avoid_terms_l if term in model_l)
+            if "latest" in model_l:
+                score += 2
+            if "preview" in model_l:
+                score -= 1
+            candidate = (score, model)
+            if best is None or candidate[0] > best[0]:
+                best = candidate
+    return best[1] if best else ""
+
+
+def _image_model_hint_from_prompt(prompt: str, owner: Optional[str] = None) -> str:
+    text = f" {prompt or ''} ".lower()
+    rows = _cached_models_for_hint(owner=owner)
+
+    if re.search(r"\b(?:gemini|google)\b", text):
+        model = _best_cached_model(
+            rows,
+            endpoint_terms=("google", "gemini", "generativelanguage.googleapis.com"),
+            include_terms=("image", "imagen"),
+            prefer_terms=("gemini", "flash", "imagen"),
+            avoid_terms=("audio", "embedding", "robotics", "live"),
+        )
+        if model:
+            return model
+        for ep, _models in rows:
+            fallback = _gemini_image_fallback_for_endpoint(ep)
+            if fallback:
+                return fallback
+
+    if re.search(r"\b(?:imagen)\b", text):
+        model = _best_cached_model(
+            rows,
+            endpoint_terms=("google", "gemini", "generativelanguage.googleapis.com"),
+            include_terms=("imagen",),
+            prefer_terms=("generate", "ultra", "fast"),
+            avoid_terms=("embedding",),
+        )
+        if model:
+            return model
+
+    if re.search(r"\b(?:chatgpt|openai|gpt)\b", text):
+        model = _best_cached_model(
+            rows,
+            endpoint_terms=("openai", "api.openai.com"),
+            include_terms=("gpt-image", "dall-e"),
+            prefer_terms=("gpt-image",),
+        )
+        if model:
+            return model
+
+    if re.search(r"\b(?:flux|black\s*forest)\b", text):
+        model = _best_cached_model(rows, include_terms=("flux",), prefer_terms=("dev", "schnell"))
+        if model:
+            return model
+
+    if re.search(r"\b(?:qwen\s*image|qwen-image)\b", text):
+        model = _best_cached_model(rows, include_terms=("qwen-image",), prefer_terms=("edit",))
+        if model:
+            return model
+
+    return ""
+
+
+def _looks_like_image_generation_model(model_id: str) -> bool:
+    model = (model_id or "").strip().lower()
+    if not model:
+        return False
+    image_terms = (
+        "gpt-image",
+        "dall-e",
+        "chatgpt-image",
+        "flux",
+        "qwen-image",
+        "imagen",
+        "stable-diffusion",
+        "stable_diffusion",
+        "sdxl",
+        "diffusion",
+        "kontext",
+    )
+    if any(term in model for term in image_terms):
+        return True
+    return "image" in model and any(term in model for term in ("gemini", "qwen", "gpt"))
+
+
+def _session_selected_image_model(session_id: Optional[str], owner: Optional[str] = None) -> str:
+    """Return the current session's selected image model, if it is image-capable."""
+    if not session_id:
+        return ""
+    session = None
+    manager = get_session_manager()
+    try:
+        if manager is not None:
+            session = getattr(manager, "sessions", {}).get(session_id)
+            if session is None and hasattr(manager, "get_session"):
+                session = manager.get_session(session_id)
+    except Exception:
+        session = None
+    if session is None:
+        return ""
+    sess_owner = (getattr(session, "owner", None) or "").strip()
+    if owner and sess_owner and sess_owner != owner:
+        return ""
+    model = (getattr(session, "model", "") or "").strip()
+    return model if _looks_like_image_generation_model(model) else ""
+
+
+def _is_ollama_image_endpoint_url(url: str) -> bool:
+    try:
+        from src.llm_core import _is_ollama_native_url, _is_ollama_openai_compat_url, _host_match
+        return (
+            _is_ollama_native_url(url)
+            or _is_ollama_openai_compat_url(url)
+            or _host_match(url, "ollama.com")
+        )
+    except Exception:
+        try:
+            parsed = urlparse(url or "")
+            host = (parsed.hostname or "").lower()
+            path = (parsed.path or "").rstrip("/")
+            local_host = host in {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
+            return local_host and (parsed.port == 11434 or path.startswith("/api") or path.startswith("/v1"))
+        except Exception:
+            return False
+
+
+def _ollama_openai_image_base(url: str) -> str:
+    parsed = urlparse(url or "")
+    if parsed.scheme and parsed.netloc:
+        return f"{parsed.scheme}://{parsed.netloc}/v1"
+    return (url or "").replace("/api/chat", "").rstrip("/") + "/v1"
+
+
+def _extract_api_key_from_headers(headers: Dict[str, str]) -> str:
+    auth = str((headers or {}).get("Authorization") or "").strip()
+    if auth.lower().startswith("bearer "):
+        return auth[7:].strip()
+    return str(
+        (headers or {}).get("x-goog-api-key")
+        or (headers or {}).get("X-Goog-Api-Key")
+        or ""
+    ).strip()
+
+
+def _gemini_api_root_from_url(url: str) -> str:
+    parsed = urlparse(url or "")
+    scheme = parsed.scheme or "https"
+    netloc = parsed.netloc or "generativelanguage.googleapis.com"
+    parts = [part for part in (parsed.path or "").split("/") if part]
+    version = "v1beta"
+    for part in parts:
+        if re.fullmatch(r"v\d+(?:beta)?", part):
+            version = part
+            break
+    return f"{scheme}://{netloc}/{version}"
+
+
+def _gemini_generate_content_url(url: str, model_id: str) -> str:
+    model = _canonical_gemini_image_model(model_id).strip()
+    if model.startswith("models/"):
+        model = model.split("/", 1)[1]
+    return f"{_gemini_api_root_from_url(url)}/models/{quote(model, safe='')}:generateContent"
+
+
+def _aspect_ratio_from_size(size: str) -> str:
+    raw = str(size or "").strip().lower()
+    if raw in {"auto", ""}:
+        return "1:1"
+    try:
+        width_s, height_s = raw.split("x", 1)
+        width = max(1, int(width_s))
+        height = max(1, int(height_s))
+    except Exception:
+        return "1:1"
+    if width == height:
+        return "1:1"
+    return "16:9" if width > height else "9:16"
+
+
+def _gemini_image_payload(prompt: str, size: str) -> Dict:
+    aspect_ratio = _aspect_ratio_from_size(size)
+    return {
+        "contents": [{
+            "role": "user",
+            "parts": [{"text": prompt}],
+        }],
+        "generationConfig": {
+            "responseModalities": ["TEXT", "IMAGE"],
+            "imageConfig": {
+                "aspectRatio": aspect_ratio,
+                "imageSize": "1K",
+            },
+        },
+    }
+
+
+def _extract_gemini_image_b64(payload) -> str:
+    if isinstance(payload, dict):
+        inline = payload.get("inlineData") or payload.get("inline_data")
+        if isinstance(inline, dict):
+            data = inline.get("data") or inline.get("bytesBase64Encoded") or inline.get("bytes_base64_encoded")
+            if isinstance(data, str) and data.strip():
+                return data.strip()
+        for value in payload.values():
+            found = _extract_gemini_image_b64(value)
+            if found:
+                return found
+    elif isinstance(payload, list):
+        for item in payload:
+            found = _extract_gemini_image_b64(item)
+            if found:
+                return found
+    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -573,8 +915,8 @@ async def do_ui_control(content: str, session_id: Optional[str] = None, owner: O
       switch_model <model>    — Change the model for the current session
       set_theme <preset>      — Apply a built-in theme preset (dark, light, midnight, paper, cyberpunk, retrowave, forest, ocean, ume, copper, terminal, organs, lavender, gpt, claude, cute)
       create_theme <name> <bg> <fg> <panel> <border> <accent> [key=val ...] — Create custom theme. Optional key=val: advanced color overrides AND background effects: bgPattern=<none|dots|synapse|rain|constellations|perlin-flow|petals|sparkles|embers>, bgEffectColor=#RRGGBB, bgEffectIntensity=<num>, bgEffectSize=<num>, frosted=true|false
-      open_panel <name>       — Open a panel (documents, gallery, email, sessions, notes, memories, skills, settings, cookbook)
-      open_email_reply <uid> [folder] [reply|reply-all|ai-reply] [body text] — Open a reply draft document for an email; does not send. ALWAYS append the body text when the user told you what to say (one-shot draft); only omit body when the user just asked to "open a reply" without content.
+      open_panel <name>       — Open a panel (documents, gallery, email, sessions, notes, calendar, tasks, research, workspace, memories, skills, settings, cookbook)
+      open_email_reply <uid> [folder] [reply|reply-all|ai-reply] — Open a reply draft document for an email; does not send
       get_toggles             — Return current toggle states (server-side knowledge)
     """
     lines = content.strip().split("\n")
@@ -774,7 +1116,8 @@ async def do_ui_control(content: str, session_id: Optional[str] = None, owner: O
 
     elif action == "open_panel":
         # Open a top-level panel/modal: documents/library, gallery,
-        # email, sessions, notes, memories, skills, settings, cookbook.
+        # email, sessions, notes, calendar, tasks, research, workspace,
+        # memories, skills, settings, cookbook.
         panel = parts[1].lower() if len(parts) > 1 else ""
         _panel_aliases = {
             "documents": "documents",
@@ -796,6 +1139,33 @@ async def do_ui_control(content: str, session_id: Optional[str] = None, owner: O
             "note": "notes",
             "todo": "notes",
             "todos": "notes",
+            "calendar": "calendar",
+            "calendars": "calendar",
+            "calander": "calendar",
+            "calanders": "calendar",
+            "calender": "calendar",
+            "calenders": "calendar",
+            "agenda": "calendar",
+            "events": "calendar",
+            "tasks": "tasks",
+            "task": "tasks",
+            "automations": "tasks",
+            "automation": "tasks",
+            "scheduled": "tasks",
+            "research": "research",
+            "deep": "research",
+            "deepresearch": "research",
+            "deep-research": "research",
+            "reports": "research",
+            "report": "research",
+            "workspace": "workspace",
+            "workspaces": "workspace",
+            "filetree": "workspace",
+            "file-tree": "workspace",
+            "foldertree": "workspace",
+            "folder-tree": "workspace",
+            "files": "workspace",
+            "folders": "workspace",
             "memories": "memories",
             "memory": "memories",
             "brain": "memories",
@@ -810,7 +1180,7 @@ async def do_ui_control(content: str, session_id: Optional[str] = None, owner: O
         }
         target = _panel_aliases.get(panel)
         if not target:
-            return {"error": f"Unknown panel '{panel}'. Valid: documents, gallery, email, sessions, notes, memories, skills, settings, cookbook."}
+            return {"error": f"Unknown panel '{panel}'. Valid: documents, gallery, email, sessions, notes, calendar, tasks, research, workspace, memories, skills, settings, cookbook."}
         return {
             "ui_event": "open_panel",
             "panel": target,
@@ -899,11 +1269,35 @@ async def do_generate_image(content: str, session_id: Optional[str] = None, owne
     from pathlib import Path
     from src.url_safety import check_outbound_url
 
-    lines = content.strip().split("\n")
-    prompt = lines[0].strip() if lines else ""
-    model_spec = lines[1].strip() if len(lines) > 1 and lines[1].strip() else ""
-    size = lines[2].strip() if len(lines) > 2 and lines[2].strip() else "1024x1024"
-    quality = lines[3].strip() if len(lines) > 3 and lines[3].strip() else "medium"
+    raw_content = (content or "").strip()
+    image_args = {}
+    if raw_content.startswith("{"):
+        try:
+            parsed = json.loads(raw_content)
+            image_args = parsed if isinstance(parsed, dict) else {}
+        except (json.JSONDecodeError, TypeError):
+            image_args = {}
+    if image_args:
+        prompt = str(image_args.get("prompt") or image_args.get("description") or "").strip()
+        style = str(image_args.get("style") or "").strip()
+        if style and style.lower() not in prompt.lower():
+            prompt = (prompt.rstrip(" .") + ". " + style).strip()
+        model_spec = str(image_args.get("model") or image_args.get("model_id") or "").strip()
+        size = str(image_args.get("size") or "1024x1024").replace("_", "x")
+        quality = str(image_args.get("quality") or "").strip().lower()
+    else:
+        lines = raw_content.split("\n")
+        prompt = lines[0].strip() if lines else ""
+        model_spec = lines[1].strip() if len(lines) > 1 and lines[1].strip() else ""
+        size = lines[2].strip() if len(lines) > 2 and lines[2].strip() else "1024x1024"
+        quality = lines[3].strip() if len(lines) > 3 and lines[3].strip() else ""
+
+    if quality in {"professional", "premium", "hero", "commercial"}:
+        quality = "high"
+    elif quality in {"draft", "fast", "cheap"}:
+        quality = "low"
+    elif not quality:
+        quality = "high"
 
     if not prompt:
         return {"error": "Image prompt is required (line 1)"}
@@ -915,10 +1309,16 @@ async def do_generate_image(content: str, session_id: Optional[str] = None, owne
     except Exception:
         _settings = {}
 
-    # Use admin-configured model/quality if not specified by the tool call
+    # Use the explicit/current/mentioned/configured image model if not specified by the tool call.
+    # The session picker is authoritative for ordinary prompts; prompt hints only
+    # apply when the chat is not already on an image-capable model.
     if not model_spec:
-        model_spec = _settings.get("image_model", "")
-    if quality == "medium" and _settings.get("image_quality"):
+        model_spec = (
+            _session_selected_image_model(session_id, owner=owner)
+            or _image_model_hint_from_prompt(prompt, owner=owner)
+            or _settings.get("image_model", "")
+        )
+    if (not image_args and len(raw_content.split("\n")) <= 3 or image_args and not image_args.get("quality")) and _settings.get("image_quality"):
         quality = _settings["image_quality"]
 
     # Auto-detect best available image model if still not set
@@ -930,6 +1330,19 @@ async def do_generate_image(content: str, session_id: Optional[str] = None, owne
                 break
             except ValueError:
                 continue
+        if not model_spec:
+            for candidate in (
+                "gemini-3-pro-image",
+                "gemini-3.1-flash-image",
+                "gemini-2.5-flash-image",
+                "gemini-image-pro",
+            ):
+                try:
+                    _resolve_model(candidate, owner=owner)
+                    model_spec = candidate
+                    break
+                except ValueError:
+                    continue
         # Fallback: find any locally registered image-type endpoint
         if not model_spec:
             try:
@@ -977,10 +1390,15 @@ async def do_generate_image(content: str, session_id: Optional[str] = None, owne
     # Detect if this is a GPT image model vs DALL-E vs local diffusion
     is_gpt_image = "gpt-image" in model_id.lower()
     is_dalle = "dall-e" in model_id.lower()
+    is_gemini_image = _is_gemini_endpoint(url) and _is_gemini_image_model(model_id)
+    is_ollama_image = _is_ollama_image_endpoint_url(url)
     is_local_diffusion = not is_gpt_image and not is_dalle
 
     # Build the images endpoint URL from the chat completions URL
-    base_url = url.replace("/chat/completions", "").replace("/v1/messages", "").rstrip("/")
+    if is_ollama_image:
+        base_url = _ollama_openai_image_base(url)
+    else:
+        base_url = url.replace("/chat/completions", "").replace("/v1/messages", "").rstrip("/")
     images_url = base_url + "/images/generations"
 
     # Validate size for cloud image models (local diffusion accepts any WxH)
@@ -997,9 +1415,11 @@ async def do_generate_image(content: str, session_id: Optional[str] = None, owne
         "n": 1,
         "size": size,
     }
+    if is_ollama_image:
+        payload["response_format"] = "b64_json"
 
-    # GPT image models and local diffusion support quality; DALL-E does not
-    if is_gpt_image or is_local_diffusion:
+    # GPT image models and local diffusion endpoints support quality; DALL-E and Ollama do not.
+    if is_gpt_image or (is_local_diffusion and not is_ollama_image):
         if quality in ("low", "medium", "high", "auto"):
             payload["quality"] = quality
         else:
@@ -1007,10 +1427,55 @@ async def do_generate_image(content: str, session_id: Optional[str] = None, owne
 
     logger.info(f"Image generation: model={model_id}, size={size}, quality={quality}, prompt={prompt[:80]}")
 
+    def _save_to_gallery(filename: str) -> str:
+        """Insert a GalleryImage row and return the new id (or '')."""
+        try:
+            from src.database import SessionLocal as _GallerySL, GalleryImage
+            new_id = str(uuid.uuid4())
+            _gdb = _GallerySL()
+            _gdb.add(GalleryImage(
+                id=new_id,
+                filename=filename,
+                prompt=prompt,
+                model=model_id,
+                size=size,
+                quality=payload.get("quality", quality),
+                session_id=session_id,
+                owner=owner,
+            ))
+            _gdb.commit()
+            _gdb.close()
+            return new_id
+        except Exception as _ge:
+            logger.warning(f"Failed to save gallery record: {_ge}")
+            return ""
+
+    def _save_image_bytes(raw: bytes) -> tuple[str, str]:
+        img_dir = Path(GENERATED_IMAGES_DIR)
+        img_dir.mkdir(parents=True, exist_ok=True)
+        filename = f"{uuid.uuid4().hex[:12]}.png"
+        img_path = img_dir / filename
+        img_path.write_bytes(raw)
+        return f"/api/generated-image/{filename}", _save_to_gallery(filename)
+
     try:
         # GPT image models can take 30-120s+ depending on quality
         async with httpx.AsyncClient(timeout=httpx.Timeout(connect=30.0, read=300.0, write=30.0, pool=30.0)) as client:
-            resp = await client.post(images_url, json=payload, headers=headers)
+            if is_gemini_image:
+                gemini_url = _gemini_generate_content_url(url, model_id)
+                gemini_headers = {"Content-Type": "application/json"}
+                api_key = _extract_api_key_from_headers(headers)
+                if api_key:
+                    gemini_headers["x-goog-api-key"] = api_key
+                else:
+                    gemini_headers.update(headers)
+                resp = await client.post(
+                    gemini_url,
+                    json=_gemini_image_payload(prompt, size),
+                    headers=gemini_headers,
+                )
+            else:
+                resp = await client.post(images_url, json=payload, headers=headers)
 
             if resp.status_code != 200:
                 error_text = resp.text[:500]
@@ -1022,6 +1487,21 @@ async def do_generate_image(content: str, session_id: Optional[str] = None, owne
                 return {"error": f"Image generation failed ({resp.status_code}): {error_text}"}
 
             data = resp.json()
+            if is_gemini_image:
+                image_b64 = _extract_gemini_image_b64(data)
+                if not image_b64:
+                    return {"error": "Gemini image API returned no inline image data."}
+                image_url, image_id = _save_image_bytes(base64.b64decode(image_b64))
+                return {
+                    "results": f"Generated image for: {prompt[:100]}",
+                    "image_url": image_url,
+                    "image_id": image_id,
+                    "image_prompt": prompt,
+                    "image_model": _canonical_gemini_image_model(model_id),
+                    "image_size": size,
+                    "image_quality": payload.get("quality", quality),
+                }
+
             images = data.get("data", [])
             if not images:
                 return {"error": "No images returned from API"}
@@ -1030,38 +1510,9 @@ async def do_generate_image(content: str, session_id: Optional[str] = None, owne
             image_url = None
             image_id = None
 
-            def _save_to_gallery(filename: str) -> str:
-                """Insert a GalleryImage row and return the new id (or '')."""
-                try:
-                    from src.database import SessionLocal as _GallerySL, GalleryImage
-                    new_id = str(uuid.uuid4())
-                    _gdb = _GallerySL()
-                    _gdb.add(GalleryImage(
-                        id=new_id,
-                        filename=filename,
-                        prompt=prompt,
-                        model=model_id,
-                        size=size,
-                        quality=payload.get("quality", "medium"),
-                        session_id=session_id,
-                        owner=owner,
-                    ))
-                    _gdb.commit()
-                    _gdb.close()
-                    return new_id
-                except Exception as _ge:
-                    logger.warning(f"Failed to save gallery record: {_ge}")
-                    return ""
-
             # GPT image models always return b64_json; DALL-E may return url
             if img.get("b64_json"):
-                img_dir = Path(GENERATED_IMAGES_DIR)
-                img_dir.mkdir(parents=True, exist_ok=True)
-                filename = f"{uuid.uuid4().hex[:12]}.png"
-                img_path = img_dir / filename
-                img_path.write_bytes(base64.b64decode(img.get("b64_json")))
-                image_url = f"/api/generated-image/{filename}"
-                image_id = _save_to_gallery(filename)
+                image_url, image_id = _save_image_bytes(base64.b64decode(img.get("b64_json")))
 
             elif img.get("url"):
                 # Download external URL and save locally (DALL-E returns temp URLs)

@@ -5,7 +5,7 @@
 
 import spinnerModule from './spinner.js';
 import sessionModule from './sessions.js';
-import { initEmailLibrary, openEmailLibrary, closeEmailLibrary, isOpen as isLibOpen } from './emailLibrary.js';
+import { initEmailLibrary, openEmailLibrary, closeEmailLibrary, isOpen as isLibOpen, prewarmEmailLibrary } from './emailLibrary.js';
 import * as Modals from './modalManager.js';
 import { applyEdgeDock } from './modalSnap.js';
 import { buildReplyAllCc, extractEmail } from './emailLibrary/replyRecipients.js';
@@ -13,7 +13,16 @@ import { emailApiUrl, emailAccountQuery } from './emailShared.js';
 import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
 
 const API_BASE = window.location.origin;
-const _acct = () => emailAccountQuery('&');
+const _acct = () => window.__odysseusActiveEmailAccount
+  ? `&account_id=${encodeURIComponent(window.__odysseusActiveEmailAccount)}`
+  : '';
+const _isCompactEmailViewport = () => {
+  try {
+    return (window.matchMedia && window.matchMedia('(max-width: 768px)').matches) || window.innerWidth <= 768;
+  } catch (_) {
+    return window.innerWidth <= 768;
+  }
+};
 
 const _emailSetupHint = () => '<div style="margin-top:6px;opacity:0.72;font-size:11px;">Setup: <span style="color:var(--accent,var(--red));">Settings &rsaquo; Integrations</span></div>';
 
@@ -162,7 +171,9 @@ let _docModule = null;
 let _listSpinner = null;
 let _senderFilter = null;       // email address (lowercased) to filter by, or null
 let _senderFilterLabel = null;  // display label for the active filter chip
-let _showEmailTags = localStorage.getItem('odysseus.email.showTags') !== '0';
+let _emailEventsBound = false;
+let _unreadRefreshTimer = null;
+let _refreshUnreadInFlight = false;
 
 export function init(documentModule) {
   _docModule = documentModule;
@@ -273,7 +284,8 @@ function _bindEvents() {
   // (except the compose button which has its own handler)
   const section = document.getElementById('email-section');
   const header = section?.querySelector('.section-header-flex');
-  if (header) {
+  if (header && header.dataset.emailInboxHeaderBound !== '1') {
+    header.dataset.emailInboxHeaderBound = '1';
     header.style.cursor = 'pointer';
     header.addEventListener('click', (e) => {
       if (e.target.closest('#email-compose-btn')) return;
@@ -284,18 +296,25 @@ function _bindEvents() {
 
   // Compose button creates a new email document
   const composeBtn = document.getElementById('email-compose-btn');
-  if (composeBtn) {
+  if (composeBtn && composeBtn.dataset.emailInboxComposeBound !== '1') {
+    composeBtn.dataset.emailInboxComposeBound = '1';
     composeBtn.addEventListener('click', (e) => {
       e.stopPropagation();
       _composeNew();
     });
   }
 
-  // Delay the lightweight unread badge check so opening Odysseus doesn't
-  // compete with the initial chat/session paint. The full email list now loads
-  // only when the inbox is actually opened.
-  setTimeout(_refreshUnreadCount, 8000);
-  setInterval(_refreshUnreadCount, 60000);
+  if (_emailEventsBound) return;
+  _emailEventsBound = true;
+
+  // Initial unread count check, refresh every 60s
+  _refreshUnreadCount();
+  if (!_unreadRefreshTimer) _unreadRefreshTimer = setInterval(_refreshUnreadCount, 60000);
+  const compactEmailView = _isCompactEmailViewport();
+  prewarmEmailLibrary({
+    delay: compactEmailView ? 12000 : 3000,
+    limit: compactEmailView ? 20 : 100,
+  });
 
   // Deep-link: #email=<folder>:<uid> opens the library and expands that card
   _maybeOpenFromHash();
@@ -322,13 +341,15 @@ function _urgencyColor(score) {
 }
 
 async function _refreshUnreadCount() {
+  if (_refreshUnreadInFlight) return;
+  _refreshUnreadInFlight = true;
   // Default the dot to hidden — only the verified "new mail above threshold"
   // path below should turn it on. Without this, a fetch error or a backend
   // returning malformed data left a stale dot from a previous account/session.
   const dot = document.getElementById('email-unread-dot');
   if (dot && !dot._stickyState) dot.style.display = 'none';
   try {
-    // Parallel: cheap unread state + urgency state.
+    // Parallel: unread state + urgency state.
     const [stateRes, urgRes] = await Promise.all([
       fetch(emailApiUrl('/api/email/unread-state', { folder: 'INBOX' })),
       fetch(`${API_BASE}/api/email/urgency-state`, { credentials: 'same-origin' }).catch(() => null),
@@ -366,6 +387,8 @@ async function _refreshUnreadCount() {
   } catch (e) {
     // Network/parse error — keep the dot hidden (default at the top).
     if (dot) dot.style.display = 'none';
+  } finally {
+    _refreshUnreadInFlight = false;
   }
 }
 
@@ -405,7 +428,8 @@ export async function loadEmails(append = false) {
 
   try {
     const fromQS = _senderFilter ? `&from=${encodeURIComponent(_senderFilter)}` : '';
-    const res = await fetch(`${API_BASE}/api/email/list?folder=${encodeURIComponent(_currentFolder)}&limit=50&offset=${_offset}${fromQS}${_acct()}`);
+    const listLimit = _isCompactEmailViewport() ? 30 : 50;
+    const res = await fetch(`${API_BASE}/api/email/list?folder=${encodeURIComponent(_currentFolder)}&limit=${listLimit}&offset=${_offset}${fromQS}${_acct()}&_=${Date.now()}`);
     const data = await res.json();
     if (data.error) throw new Error(data.error);
 

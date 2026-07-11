@@ -25,12 +25,40 @@
  *   }
  */
 
-import { previewZoneAt, clearPreview, snapModalToZone } from './tileManager.js';
-import { suspendDock, resumeDock, clearRightDock, applyEdgeDock } from './modalSnap.js';
+import {
+  previewZoneAt,
+  clearPreview,
+  snapModalToZone,
+  restoreModalSnap,
+  fullscreenWorkspaceRect,
+  fixedLayoutRect,
+  viewportLayoutRect,
+} from './tileManager.js';
+import {
+  suspendDock,
+  resumeDock,
+  clearRightDock,
+  applyEdgeDock,
+  clearDockSide,
+  canUseEdgeDock,
+  preferredEdgeDockSide,
+} from './modalSnap.js';
 import { dismissOrRemove } from './escMenuStack.js';
 import { nextToolWindowZ } from './toolWindowZOrder.js';
 
 const _state = new Map(); // id -> { restoreFn, closeFn, railBtnId, isMinimized, restoreMinHeight }
+const _EDGE_DOCK_SIDES = ['left', 'right', 'top', 'bottom'];
+
+function _edgeDockSide(modal, content = _modalWindowContent(modal)) {
+  if (_EDGE_DOCK_SIDES.includes(content?._dockSide)) return content._dockSide;
+  const classSide = _EDGE_DOCK_SIDES.find((side) => modal?.classList?.contains(`modal-${side}-docked`));
+  if (classSide) return classSide;
+  return modal?.classList?.contains('email-snap-left') ? 'left' : null;
+}
+
+function _isEdgeDocked(modal) {
+  return !!_edgeDockSide(modal);
+}
 
 const _rememberedDockKey = (id) => `odysseus-modal-remembered-dock-${id}`;
 function _rememberDock(id, side) {
@@ -44,17 +72,298 @@ function _forgetDock(id) {
 function _getRememberedDock(id) {
   try {
     const side = localStorage.getItem(_rememberedDockKey(id));
-    return (side === 'left' || side === 'right') ? side : null;
+    return _EDGE_DOCK_SIDES.includes(side) ? side : null;
   } catch (_) {
     return null;
   }
 }
 function _applyRememberedDock(id) {
+  if (_androidAutoDockEnabled()) return;
   const side = _getRememberedDock(id);
   if (!side) return;
   const modal = document.getElementById(id);
   if (!modal || modal.classList.contains('hidden') || modal.classList.contains('modal-minimized')) return;
   try { applyEdgeDock(modal, side); } catch (e) { console.warn('apply remembered dock failed', e); }
+}
+
+const _FULL_EXPAND_CLASSES = [
+  'modal-full-expanded',
+  'doclib-fullscreen',
+  'email-lib-fullscreen',
+  'email-window-fullscreen',
+  'notes-window-fullscreen',
+];
+const _FULL_EXPAND_TOGGLE_LOCK_MS = 280;
+
+function _modalWindowContent(modal) {
+  if (!modal) return null;
+  return modal.querySelector?.('.modal-content, .research-pane, #theme-popup') || modal;
+}
+
+function _fullscreenClassFor(modal) {
+  const id = modal?.id || '';
+  if (id === 'doclib-modal') return 'doclib-fullscreen';
+  if (id === 'email-lib-modal') return 'email-lib-fullscreen';
+  if (id.startsWith('email-reader-') || modal?.classList?.contains('email-window-modal')) return 'email-window-fullscreen';
+  if (id === 'notes-panel' || modal?.classList?.contains('notes-pane')) return 'notes-window-fullscreen';
+  return 'modal-full-expanded';
+}
+
+function _clearFullExpandClasses(modal) {
+  if (!modal?.classList) return;
+  modal.classList.remove(..._FULL_EXPAND_CLASSES);
+}
+
+function _isFullExpanded(modal) {
+  const content = _modalWindowContent(modal);
+  return !!(content?.dataset?._tileZone === 'fullscreen'
+    || _FULL_EXPAND_CLASSES.some((cls) => modal?.classList?.contains(cls)));
+}
+
+function _isFullExpandToggleLocked(modal) {
+  const until = modal?._mmFullExpandToggleLockedUntil || 0;
+  const now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+  return until > now;
+}
+
+function _lockFullExpandToggle(modal) {
+  if (!modal) return;
+  const now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+  modal._mmFullExpandToggleLockedUntil = now + _FULL_EXPAND_TOGGLE_LOCK_MS;
+  setTimeout(() => {
+    const cur = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+    if ((modal._mmFullExpandToggleLockedUntil || 0) <= cur) {
+      delete modal._mmFullExpandToggleLockedUntil;
+    }
+  }, _FULL_EXPAND_TOGGLE_LOCK_MS + 40);
+}
+
+function _restoreFullscreenFallback(modal) {
+  const content = _modalWindowContent(modal);
+  if (!content?.style) return;
+  ['right', 'bottom', 'width', 'maxWidth', 'height', 'maxHeight', 'borderRadius', 'transition']
+    .forEach((prop) => { content.style[prop] = ''; });
+  content.style.position = 'fixed';
+  content.style.margin = '0';
+  content.style.transform = 'none';
+  const width = Math.min(720, Math.max(320, window.innerWidth * 0.92));
+  content.style.left = Math.max(8, (window.innerWidth - width) / 2) + 'px';
+  content.style.top = Math.max(8, window.innerHeight * 0.075) + 'px';
+  if (modal?.id === 'email-lib-modal' || modal?.id?.startsWith('email-reader-')) {
+    content.style.width = 'min(720px, 92vw)';
+    content.style.maxHeight = '85vh';
+  }
+}
+
+function _clearEmailSplitGeometry() {
+  document.body.classList.remove('email-doc-split-active', 'email-front');
+  document.documentElement.style.removeProperty('--email-doc-split-left-x');
+  document.documentElement.style.removeProperty('--email-doc-split-email-w');
+  document.documentElement.style.removeProperty('--email-doc-split-right-x');
+  const docPane = document.getElementById('doc-editor-pane');
+  if (docPane) {
+    [
+      'position', 'left', 'right', 'top', 'bottom', 'width', 'max-width',
+      'height', 'z-index', 'transform',
+    ].forEach((prop) => docPane.style.removeProperty(prop));
+  }
+  const divider = document.getElementById('doc-divider');
+  if (divider) divider.style.display = '';
+}
+
+function _pinContentToCurrentRect(content) {
+  if (!content?.getBoundingClientRect) return;
+  const rect = content.getBoundingClientRect();
+  content.style.position = 'fixed';
+  content.style.left = `${Math.round(rect.left)}px`;
+  content.style.top = `${Math.round(rect.top)}px`;
+  content.style.right = '';
+  content.style.bottom = '';
+  content.style.width = `${Math.max(1, Math.round(rect.width))}px`;
+  content.style.maxWidth = `${Math.max(1, Math.round(rect.width))}px`;
+  content.style.height = `${Math.max(1, Math.round(rect.height))}px`;
+  content.style.maxHeight = `${Math.max(1, Math.round(rect.height))}px`;
+  content.style.margin = '0';
+  content.style.transform = 'none';
+}
+
+function _releaseWindowDockState(modal, content) {
+  if (!modal || !content) return;
+  if (_isEdgeDocked(modal) && !modal.classList.contains('email-snap-left')) {
+    try { clearRightDock(modal); } catch (e) { console.warn('clear dock before full expand failed', e); }
+  }
+  if (modal.classList.contains('email-snap-left')) {
+    _pinContentToCurrentRect(content);
+    modal.classList.remove('email-snap-left');
+    try { clearDockSide('left', modal); } catch (_) {}
+    _clearEmailSplitGeometry();
+  }
+  const suspendedSide = content._dockSuspended;
+  if (_EDGE_DOCK_SIDES.includes(suspendedSide)) {
+    try { clearDockSide(suspendedSide, modal); } catch (_) {}
+  }
+  delete content._dockSide;
+  delete content._dockOwner;
+  delete content._dockSuspended;
+}
+
+function _captureFullExpandReturnState(modal, content) {
+  if (!modal || !content) return null;
+  const side = _edgeDockSide(modal, content);
+  if (!_EDGE_DOCK_SIDES.includes(side)) return null;
+  return {
+    mode: 'dock',
+    side,
+    touchLandscapeDockWidth: content._touchLandscapeDockWidth || null,
+    userDockWidth: content._userDockWidth || null,
+    userDockHeight: content._userDockHeight || null,
+    emailDocSplitUserW: content._emailDocSplitUserW || null,
+  };
+}
+
+function _restoreFullExpandReturnState(modal, content) {
+  const state = content?._fullExpandReturnState;
+  delete content?._fullExpandReturnState;
+  if (!modal || !content || state?.mode !== 'dock') return false;
+  try { restoreModalSnap(modal); } catch (_) {}
+  _clearFullExpandClasses(modal);
+  if (state.touchLandscapeDockWidth) content._touchLandscapeDockWidth = state.touchLandscapeDockWidth;
+  if (state.userDockWidth) content._userDockWidth = state.userDockWidth;
+  if (state.userDockHeight) content._userDockHeight = state.userDockHeight;
+  if (state.emailDocSplitUserW) content._emailDocSplitUserW = state.emailDocSplitUserW;
+  try {
+    const dockWidth = applyEdgeDock(modal, state.side);
+    return dockWidth > 0;
+  } catch (e) {
+    console.warn('restore dock after full expand failed', e);
+  }
+  return false;
+}
+
+function _syncExpandButton(btn, modal) {
+  if (!btn) return;
+  const hidden = _isTouchPortrait();
+  btn.hidden = hidden;
+  btn.style.display = hidden ? 'none' : '';
+  btn.disabled = hidden;
+  if (hidden) {
+    btn.classList.remove('active');
+    btn.title = 'Fullscreen hidden in portrait';
+    btn.setAttribute('aria-label', 'Fullscreen hidden in portrait');
+    return;
+  }
+  const active = _isFullExpanded(modal);
+  btn.classList.toggle('active', active);
+  btn.title = active ? 'Restore' : 'Full expand';
+  btn.setAttribute('aria-label', active ? 'Restore window' : 'Full expand window');
+}
+
+function _syncAllExpandButtons() {
+  document.querySelectorAll('.modal, .research-overlay, .notes-pane-backdrop').forEach((modal) => {
+    const btn = modal.querySelector?.('.modal-expand-btn, [data-full-expand]');
+    if (btn) _syncExpandButton(btn, modal);
+  });
+}
+
+function _fullViewportRect() {
+  return viewportLayoutRect();
+}
+
+function _fullExpandTargetRect(modal) {
+  if (_isTouchLandscape()) return fullscreenWorkspaceRect();
+  return modal?.getBoundingClientRect
+    ? fixedLayoutRect(modal.getBoundingClientRect())
+    : _fullViewportRect();
+}
+
+function _fitFullExpandedContentToModalFrame(modal) {
+  const content = _modalWindowContent(modal);
+  if (!modal?.getBoundingClientRect || !content?.style) return;
+  const rect = _fullExpandTargetRect(modal);
+  if (!rect || rect.width <= 1 || rect.height <= 1) return;
+  content.style.setProperty('position', 'fixed', 'important');
+  content.style.setProperty('left', `${Math.round(rect.left)}px`, 'important');
+  content.style.setProperty('top', `${Math.round(rect.top)}px`, 'important');
+  content.style.setProperty('width', `${Math.round(rect.width)}px`, 'important');
+  content.style.setProperty('max-width', 'none', 'important');
+  content.style.setProperty('height', `${Math.round(rect.height)}px`, 'important');
+  content.style.setProperty('max-height', `${Math.round(rect.height)}px`, 'important');
+  content.style.setProperty('margin', '0', 'important');
+  content.style.setProperty('transform', 'none', 'important');
+  content.dataset._tileZone = 'fullscreen';
+}
+
+function _forEachFullExpandedModal(fn) {
+  document.querySelectorAll('.modal, .research-overlay, .notes-pane-backdrop').forEach((modal) => {
+    if (!modal.isConnected || modal.classList.contains('hidden') || !_isFullExpanded(modal)) return;
+    fn(modal);
+  });
+}
+
+let _fullExpandRefitTimer = 0;
+let _fullExpandFrameObserver = null;
+
+function _scheduleFullExpandRefitAll() {
+  if (_fullExpandRefitTimer) clearTimeout(_fullExpandRefitTimer);
+  const run = () => _forEachFullExpandedModal(_fitFullExpandedContentToModalFrame);
+  requestAnimationFrame(run);
+  _fullExpandRefitTimer = setTimeout(() => {
+    _fullExpandRefitTimer = 0;
+    run();
+  }, 140);
+}
+
+function _scheduleFullExpandGeometrySettle(modal) {
+  if (!modal) return;
+  const run = () => {
+    if (!modal.isConnected || modal.classList.contains('hidden') || !_isFullExpanded(modal)) return;
+    _fitFullExpandedContentToModalFrame(modal);
+  };
+  requestAnimationFrame(run);
+  setTimeout(run, 80);
+  setTimeout(run, 240);
+  setTimeout(run, 560);
+  setTimeout(run, 900);
+}
+
+export function toggleFullExpand(id) {
+  const modal = typeof id === 'string' ? document.getElementById(id) : id;
+  if (!modal) return false;
+  if (_isFullExpandToggleLocked(modal)) return true;
+  _lockFullExpandToggle(modal);
+  const content = _modalWindowContent(modal);
+  if (!content) return false;
+  const wasExpanded = _isFullExpanded(modal);
+  if (wasExpanded) {
+    const restoredDock = _restoreFullExpandReturnState(modal, content);
+    if (!restoredDock) {
+      const restored = restoreModalSnap(modal);
+      _clearFullExpandClasses(modal);
+      _releaseWindowDockState(modal, content);
+      if (!restored) _restoreFullscreenFallback(modal);
+    }
+  } else {
+    const returnState = _captureFullExpandReturnState(modal, content);
+    if (returnState) content._fullExpandReturnState = returnState;
+    else delete content._fullExpandReturnState;
+    if (!returnState) _forgetDock(modal.id);
+    _releaseWindowDockState(modal, content);
+    _bringToFront(modal);
+    _clearFullExpandClasses(modal);
+    modal.classList.add('modal-full-expanded');
+    const fsClass = _fullscreenClassFor(modal);
+    if (fsClass !== 'modal-full-expanded') modal.classList.add(fsClass);
+    const rect = _isTouchLandscape() ? fullscreenWorkspaceRect() : _fullViewportRect();
+    snapModalToZone(modal, {
+      name: 'fullscreen',
+      force: true,
+      rect,
+    });
+    _scheduleFullExpandGeometrySettle(modal);
+  }
+  _syncExpandButton(modal.querySelector?.('.modal-expand-btn'), modal);
+  try { window.dispatchEvent(new Event('resize')); } catch (_) {}
+  return true;
 }
 
 // Monotonic stacking counter so the most-recently-surfaced tool window always
@@ -63,6 +372,47 @@ function _applyRememberedDock(id) {
 // it BEHIND an already-open tool with a higher static z-index. Start above
 // those statics and bump on every bring-to-front.
 let _modalTopZ = 300;
+const DESKTOP_VISIBLE_WINDOW_LIMIT = 4;
+let _desktopWindowBudgetEnforcing = false;
+
+function _isDesktopWindowBudgetEnabled() {
+  return !_isOdysseusAndroidApp() && window.innerWidth > 768 && !_isTouchInput();
+}
+
+function _isFloatingBudgetWindow(modal) {
+  if (!modal || _isFullExpanded(modal)) return false;
+  return !_isEdgeDocked(modal);
+}
+
+function _enforceDesktopWindowBudget(activeId) {
+  if (_desktopWindowBudgetEnforcing || !_isDesktopWindowBudgetEnabled()) return;
+  const visible = [];
+  for (const [id, state] of _state.entries()) {
+    if (state?.isMinimized) continue;
+    const modal = document.getElementById(id);
+    if (!_isFloatingBudgetWindow(modal) || !_isModalVisible(modal)) continue;
+    visible.push({ id, activeAt: state.lastActiveAt || 0 });
+  }
+  if (visible.length <= DESKTOP_VISIBLE_WINDOW_LIMIT) return;
+
+  _desktopWindowBudgetEnforcing = true;
+  try {
+    visible.sort((a, b) => a.activeAt - b.activeAt);
+    let excess = visible.length - DESKTOP_VISIBLE_WINDOW_LIMIT;
+    for (const victim of visible) {
+      if (excess <= 0) break;
+      if (victim.id === activeId) continue;
+      try {
+        if (minimize(victim.id)) excess -= 1;
+      } catch (e) {
+        console.warn('desktop window budget minimize failed', victim.id, e);
+      }
+    }
+  } finally {
+    _desktopWindowBudgetEnforcing = false;
+  }
+}
+
 function _bringToFront(modal) {
   if (!modal) return;
   const z = nextToolWindowZ({
@@ -72,6 +422,10 @@ function _bringToFront(modal) {
   });
   _modalTopZ = Math.max(_modalTopZ, z);
   modal.style.setProperty('z-index', String(z), 'important');
+  const id = modal.id || '';
+  const state = id ? _state.get(id) : null;
+  if (state) state.lastActiveAt = z;
+  if (id) setTimeout(() => _enforceDesktopWindowBudget(id), 0);
 }
 
 function _emitModalOpened(id, modal) {
@@ -86,6 +440,10 @@ function _captureRestoreHeight(modal, state) {
   if (!modal || !state) return;
   const content = modal.querySelector('.modal-content');
   if (!content) return;
+  if (_isEdgeDocked(modal)) {
+    delete state.restoreMinHeight;
+    return;
+  }
   if (modal.id === 'email-lib-modal'
       && (modal.classList.contains('modal-left-docked')
           || modal.classList.contains('email-snap-left')
@@ -113,6 +471,24 @@ function _applyRestoreHeight(modal, state) {
     : 0;
   const height = Number.isFinite(requested) ? Math.max(minHeight, Math.min(requested, maxHeight)) : null;
   if (height) content.style.minHeight = `${height}px`;
+}
+
+function _isMobileSheetViewport() {
+  return window.innerWidth <= 768 || 'ontouchstart' in window;
+}
+
+function _settleMobileSheet(modal) {
+  if (!modal || !_isMobileSheetViewport()) return;
+  const content = modal.querySelector('.modal-content') || modal.querySelector('#theme-popup');
+  if (!content) return;
+  setTimeout(() => {
+    if (content.isConnected
+        && !content.classList.contains('modal-closing')
+        && !modal.classList.contains('hidden')
+        && !modal.classList.contains('modal-minimized')) {
+      content.classList.add('sheet-ready');
+    }
+  }, 260);
 }
 
 function _setBadge(btnIds, on) {
@@ -146,6 +522,7 @@ const _LABELS = {
   'compare-model-overlay': { label: 'Compare',  icon: 'M8 3v18M16 3v18M3 8h5M16 16h5' },
   'settings-modal':    { label: 'Settings',  icon: 'M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9c.4.4.62.94.6 1.51V11a2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z' },
   'ge-shortcuts-modal':{ label: 'Shortcuts', icon: 'M2 6h20v12H2zM6 10h.01M10 10h.01M14 10h.01M18 10h.01M7 14h10' },
+  'android-connect-modal':{ label: 'Connect', icon: 'M10 13a5 5 0 0 0 7.54.54l2-2a5 5 0 0 0-7.07-7.07l-1.15 1.15M14 11a5 5 0 0 0-7.54-.54l-2 2a5 5 0 0 0 7.07 7.07l1.15-1.15' },
   // Virtual id — the doc editor pane isn't a modal, but it minimizes to a
   // chip via the same dock infrastructure.
   'doc-panel':         { label: 'Document', icon: 'M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8zM14 2v6h6M16 13H8M16 17H8M10 9H8' },
@@ -153,10 +530,14 @@ const _LABELS = {
 
 function _ensureDock() {
   let dock = document.getElementById('minimized-dock');
-  if (dock) return dock;
+  if (dock) {
+    _wireDockPlacement(dock);
+    return dock;
+  }
   dock = document.createElement('div');
   dock.id = 'minimized-dock';
   document.body.appendChild(dock);
+  _wireDockPlacement(dock);
   _loadDockState();
   return dock;
 }
@@ -178,7 +559,41 @@ const _renderedChipIds = new Set();
 
 // ── Persistence (mobile dock + free-chip positions) ──
 const _DOCK_STORAGE_KEY = 'odysseus.mobileDockState.v1';
+const DEFAULT_DOCK_RESET_RADIUS = 72;
+const DEFAULT_DOCK_HOME_BAND_HEIGHT = 132;
+const TOP_LEFT_FALLBACK_SLOP = 16;
+const TOUCH_DOCK_PAGE_CHIPS = 4;
+const TOUCH_DOCK_ROW_PAGE_WIDTH = (TOUCH_DOCK_PAGE_CHIPS * 40) + ((TOUCH_DOCK_PAGE_CHIPS - 1) * 8) + 12;
+const TOUCH_DOCK_STACK_PAGE_WIDTH = 52;
+const TOUCH_DOCK_STACK_PAGE_HEIGHT = TOUCH_DOCK_ROW_PAGE_WIDTH;
 let _dockStateLoaded = false;
+let _dockPosByLayout = {};
+let _dockLayout = _dockLayoutKey();
+
+function _dockLayoutKey() {
+  return window.matchMedia('(orientation: portrait)').matches ? 'portrait' : 'landscape';
+}
+
+function _clampStoredDockPos(pos) {
+  if (!pos || !Number.isFinite(pos.left) || !Number.isFinite(pos.top)) return null;
+  const clamped = {
+    left: Math.max(8, Math.min(window.innerWidth - 60, pos.left)),
+    top:  Math.max(8, Math.min(_aboveComposerTop(40), pos.top)),
+  };
+  return _isTopLeftFallbackPosition(clamped) ? null : clamped;
+}
+
+function _syncDockLayout() {
+  const nextLayout = _dockLayoutKey();
+  if (nextLayout === _dockLayout) return;
+  if (_dockPos && !_isTopLeftFallbackPosition(_dockPos)) {
+    _dockPosByLayout[_dockLayout] = _dockPos;
+  } else {
+    delete _dockPosByLayout[_dockLayout];
+  }
+  _dockLayout = nextLayout;
+  _dockPos = _clampStoredDockPos(_dockPosByLayout[_dockLayout]);
+}
 
 function _saveDockState() {
   // The dock-pad position is remembered on every platform. The per-chip
@@ -186,8 +601,17 @@ function _saveDockState() {
   // entries to persist there on touch layouts — but writing the (empty)
   // map on desktop is harmless.
   try {
+    _syncDockLayout();
+    _pruneFallbackChipPositions();
+    if (_dockPos && _isTopLeftFallbackPosition(_dockPos)) _dockPos = null;
+    if (_dockPos) {
+      _dockPosByLayout[_dockLayout] = _dockPos;
+    } else {
+      delete _dockPosByLayout[_dockLayout];
+    }
     const state = {
       dockPos: _dockPos,
+      dockPosByLayout: _dockPosByLayout,
       chips: Object.fromEntries(_chipPositions),
     };
     localStorage.setItem(_DOCK_STORAGE_KEY, JSON.stringify(state));
@@ -204,40 +628,558 @@ function _loadDockState() {
     if (state.chips && typeof state.chips === 'object') {
       for (const [id, pos] of Object.entries(state.chips)) {
         if (pos && typeof pos.left === 'number' && typeof pos.top === 'number') {
-          // Clamp to current viewport in case orientation/size changed
-          const left = Math.max(4, Math.min(window.innerWidth - 44, pos.left));
-          const top  = Math.max(4, Math.min(window.innerHeight - 44, pos.top));
-          _chipPositions.set(id, { left, top });
+          // Clamp to current workspace in case orientation/size changed.
+          const clamped = _clampChipPosition(pos.left, pos.top, 44, 44);
+          if (!_isTopLeftFallbackPosition(clamped)) {
+            _chipPositions.set(id, clamped);
+          }
         }
       }
     }
-    // Dock position — accept the new {left,top} shape, and fall back to the
-    // legacy dockLeft/dockTop strings written by older builds.
-    let dp = state.dockPos;
-    if (!dp && state.dockLeft && state.dockTop) {
-      dp = { left: parseFloat(state.dockLeft), top: parseFloat(state.dockTop) };
+    if (state.dockPosByLayout && typeof state.dockPosByLayout === 'object') {
+      _dockPosByLayout = { ...state.dockPosByLayout };
     }
-    if (dp && Number.isFinite(dp.left) && Number.isFinite(dp.top)) {
-      // Clamp into the current viewport so a saved spot from a larger
-      // window doesn't strand the dock off-screen.
-      _dockPos = {
-        left: Math.max(8, Math.min(window.innerWidth - 60, dp.left)),
-        top:  Math.max(8, Math.min(window.innerHeight - 40, dp.top)),
-      };
-    }
+    _dockLayout = _dockLayoutKey();
+    // Only restore a position saved for this orientation. Legacy unscoped
+    // dockPos values are ignored so portrait/landscape fall back to the
+    // dynamic above-chat default instead of inheriting the other layout.
+    _dockPos = _clampStoredDockPos(_dockPosByLayout[_dockLayout]);
   } catch {}
 }
 
 // Push the remembered dock position onto the live element. Called on every
 // render because the empty-dock branch wipes inline styles via cssText='',
 // which would otherwise drop the position the moment the dock clears.
+function _isTouchInput() {
+  return window.matchMedia('(pointer: coarse)').matches ||
+    window.matchMedia('(hover: none)').matches ||
+    navigator.maxTouchPoints > 0;
+}
+
+function _isMobileDevice() {
+  const ua = navigator.userAgent || '';
+  return /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(ua)
+    || (/Macintosh/i.test(ua) && (navigator.maxTouchPoints || 0) > 1);
+}
+
+function _isTouchLandscape() {
+  if (!_isMobileDevice()) return false;
+  return window.matchMedia('(orientation: landscape)').matches && _isTouchInput();
+}
+
+function _isTouchPortrait() {
+  if (!_isMobileDevice()) return false;
+  return window.matchMedia('(orientation: portrait)').matches && _isTouchInput();
+}
+
+function _usesCompactTouchChips() {
+  return (_isTouchPortrait() || _isTouchLandscape());
+}
+
+function _isOdysseusAndroidApp() {
+  const ua = navigator.userAgent || '';
+  return /\bOdysseusAndroid\b/i.test(ua) || !!window.OdysseusAndroid;
+}
+
+function _androidAutoDockEnabled() {
+  return _isOdysseusAndroidApp() && _isTouchLandscape() && canUseEdgeDock();
+}
+
+function _isModalVisible(modal) {
+  if (!modal || modal.classList?.contains('hidden') || modal.classList?.contains('modal-minimized')) return false;
+  if (modal.style?.display === 'none') return false;
+  const cs = getComputedStyle(modal);
+  if (cs.display === 'none' || cs.visibility === 'hidden') return false;
+  const content = _modalWindowContent(modal);
+  const rect = content?.getBoundingClientRect?.();
+  return !!rect && rect.width > 0 && rect.height > 0;
+}
+
+function _isAndroidAutoDockTarget(id, modal) {
+  if (!id || !modal || id === 'doc-panel') return false;
+  if (_AUTO_WIRE[id]) return true;
+  if (id.startsWith('email-reader-')) return true;
+  return !!modal.classList?.contains('email-window-modal');
+}
+
+function _isDockedOrExpanded(modal) {
+  if (_isFullExpanded(modal)) return true;
+  const docked = _isEdgeDocked(modal);
+  if (!docked) return false;
+  return !_modalWindowContent(modal)?._dockSuspended;
+}
+
+function _scheduleAndroidDefaultDock(id, modal) {
+  if (!_androidAutoDockEnabled() || !_isAndroidAutoDockTarget(id, modal)) return false;
+  if (_isDockedOrExpanded(modal)) return true;
+  const token = (modal._mmAndroidAutoDockToken || 0) + 1;
+  modal._mmAndroidAutoDockToken = token;
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    if (modal._mmAndroidAutoDockToken !== token) return;
+    if (!_androidAutoDockEnabled() || !_isAndroidAutoDockTarget(id, modal) || !_isModalVisible(modal)) return;
+    if (_isDockedOrExpanded(modal)) return;
+    try {
+      const content = _modalWindowContent(modal);
+      if (content?._dockSuspended) delete content._dockSuspended;
+      applyEdgeDock(modal, preferredEdgeDockSide(modal));
+    } catch (e) {
+      console.warn('Android auto dock failed', e);
+    }
+  }));
+  return true;
+}
+
+function _handleModalShown(id, modal) {
+  _bringToFront(modal);
+  if (!_scheduleAndroidDefaultDock(id, modal)) _applyRememberedDock(id);
+  _emitModalOpened(id, modal);
+
+  // When a non-email overlay opens on a touch device, minimise the document
+  // editor panel so it doesn't leave a gap in the flex layout.  Email windows
+  // coexist with the doc panel (email-doc-split) so they are excluded.
+  // Works the same as every other window on mobile/landscape — minimise to a
+  // dock chip so the user's work is preserved and one-tap restorable.
+  if (_isTouchInput() && id !== 'doc-panel' && !id.startsWith('email-reader-') && id !== 'email-lib-modal') {
+    try {
+      const docMod = window.documentModule;
+      if (docMod && docMod.isPanelOpen && docMod.isPanelOpen()) {
+        docMod.closePanel('down');
+      }
+    } catch (_) { /* non-critical — best-effort */ }
+  }
+}
+
+function _readRootPx(name) {
+  const raw = getComputedStyle(document.documentElement).getPropertyValue(name);
+  const n = parseFloat(raw || '');
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+function _uiScaleFactor() {
+  const raw = getComputedStyle(document.documentElement).getPropertyValue('--ui-scale-factor');
+  const n = parseFloat(raw || '');
+  return Number.isFinite(n) && n > 0 ? n : 1;
+}
+
+function _visibleRect(el) {
+  if (!el) return null;
+  const cs = window.getComputedStyle(el);
+  if (cs.display === 'none' || cs.visibility === 'hidden') return null;
+  const rect = el.getBoundingClientRect();
+  return rect && rect.width > 0 && rect.height > 0 ? rect : null;
+}
+
+function _composerTop() {
+  let top = window.innerHeight;
+  for (const el of [document.getElementById('attach-strip'), document.querySelector('.chat-input-bar')]) {
+    const rect = _visibleRect(el);
+    if (rect) top = Math.min(top, rect.top);
+  }
+  return Math.max(0, top);
+}
+
+function _aboveComposerTop(height) {
+  return Math.max(8, _composerTop() - height - 8);
+}
+
+function _desktopChatbarDockRect(bounds = _dockWorkspaceBounds(), dock = null) {
+  if (_isMobileDevice()) return null;
+  const rect = _visibleRect(document.querySelector('.chat-input-bar'));
+  if (!rect) return null;
+  const left = Math.max(bounds.left + 8, rect.left);
+  const right = Math.min(bounds.right - 8, rect.right);
+  const width = Math.floor(right - left);
+  if (width < 120) return null;
+  const scale = _uiScaleFactor();
+  const dockHeight = Math.max(36, dock?.offsetHeight || 36);
+  const gap = 8 * scale;
+  const dockHeightVisual = dockHeight * scale;
+  const hasRoomAbove = rect.top >= dockHeightVisual + gap + 4;
+  const hasRoomBelow = (window.innerHeight - rect.bottom) >= dockHeightVisual + gap + 4;
+  if (!hasRoomAbove && !hasRoomBelow) return null;
+  const top = hasRoomAbove
+    ? rect.top - dockHeightVisual - gap
+    : rect.bottom + gap;
+  return {
+    left: Math.round(left / scale),
+    top: Math.round(top / scale),
+    width: Math.floor(width / scale),
+  };
+}
+
+function _defaultDockPosition(dock, width, height) {
+  const bounds = _dockWorkspaceBounds();
+  const dockWidth = Math.max(44, width || dock?.offsetWidth || 44);
+  const dockHeight = Math.max(36, height || dock?.offsetHeight || 36);
+  const clearance = _readRootPx('--composer-clearance');
+  const top = clearance > 0
+    ? window.innerHeight - clearance - dockHeight
+    : _aboveComposerTop(dockHeight);
+  return _clampDockPosition(
+    dock || { offsetWidth: dockWidth, offsetHeight: dockHeight },
+    Math.round((bounds.left + bounds.right - dockWidth) / 2),
+    top,
+  );
+}
+
+function _isNearDefaultDockPosition(dock, left, top, width, height) {
+  const dockWidth = Math.max(44, width || dock?.offsetWidth || 44);
+  const dockHeight = Math.max(36, height || dock?.offsetHeight || 36);
+  const home = _defaultDockPosition(dock, dockWidth, dockHeight);
+  const cx = left + dockWidth / 2;
+  const cy = top + dockHeight / 2;
+  const hx = home.left + dockWidth / 2;
+  const hy = home.top + dockHeight / 2;
+  return Math.hypot(cx - hx, cy - hy) <= DEFAULT_DOCK_RESET_RADIUS;
+}
+
+function _isInDefaultDockHomeBand(dock, left, top, width, height) {
+  const bounds = _dockWorkspaceBounds();
+  const dockWidth = Math.max(44, width || dock?.offsetWidth || 44);
+  const dockHeight = Math.max(36, height || dock?.offsetHeight || 36);
+  const centerX = left + dockWidth / 2;
+  const centerY = top + dockHeight / 2;
+  const workspaceCenter = (bounds.left + bounds.right) / 2;
+  const horizontalSlack = Math.max(96, Math.min(180, (bounds.right - bounds.left) * 0.28));
+  const composerTop = _composerTop();
+  return Math.abs(centerX - workspaceCenter) <= horizontalSlack
+    && centerY >= composerTop - DEFAULT_DOCK_HOME_BAND_HEIGHT
+    && centerY <= composerTop - 2;
+}
+
+function _isDefaultDockDrop(dock, left, top, width, height) {
+  return _isNearDefaultDockPosition(dock, left, top, width, height)
+    || _isInDefaultDockHomeBand(dock, left, top, width, height);
+}
+
+function _isTopLeftFallbackPosition(pos) {
+  if (!pos || !Number.isFinite(pos.left) || !Number.isFinite(pos.top)) return false;
+  const bounds = _dockWorkspaceBounds();
+  return pos.left <= bounds.left + TOP_LEFT_FALLBACK_SLOP
+    && pos.top <= TOP_LEFT_FALLBACK_SLOP;
+}
+
+function _pruneFallbackChipPositions() {
+  let pruned = false;
+  for (const [id, pos] of _chipPositions) {
+    if (_isTopLeftFallbackPosition(pos)) {
+      _chipPositions.delete(id);
+      pruned = true;
+    }
+  }
+  return pruned;
+}
+
+function _resetDockToDefault(dock) {
+  _syncDockLayout();
+  _dockPos = null;
+  delete _dockPosByLayout[_dockLayout];
+  if (dock && dock.children && dock.children.length > 0) _applyDockPos(dock);
+  _saveDockState();
+}
+
+function _dockWorkspaceBounds() {
+  let left = 0;
+  let right = window.innerWidth;
+  const body = document.body;
+  if (body.classList.contains('left-dock-active') && !body.classList.contains('email-doc-split-active')) {
+    left = Math.max(left, _readRootPx('--left-dock-w') * _uiScaleFactor());
+  }
+  if (body.classList.contains('right-dock-active')) {
+    right = Math.min(right, window.innerWidth - (_readRootPx('--right-dock-w') * _uiScaleFactor()));
+  }
+
+  for (const el of [document.getElementById('sidebar'), document.getElementById('icon-rail')]) {
+    const rect = _visibleRect(el);
+    if (!rect) continue;
+    const isHiddenSidebar = el.id === 'sidebar' && el.classList.contains('hidden');
+    if (isHiddenSidebar) continue;
+    if (el.classList.contains('right-side') || rect.right >= window.innerWidth - 1) {
+      right = Math.min(right, rect.left);
+    } else if (rect.left <= 1) {
+      left = Math.max(left, rect.right);
+    }
+  }
+
+  if (right - left < 80) return { left: 8, right: window.innerWidth - 8 };
+  return { left, right };
+}
+
+function _isTouchMenuOpen() {
+  const sidebar = document.getElementById('sidebar');
+  if (sidebar && !sidebar.classList.contains('hidden') && _visibleRect(sidebar)) return true;
+  const rail = document.getElementById('icon-rail');
+  return !!(rail && rail.classList.contains('mobile-mini') && _visibleRect(rail));
+}
+
+function _isPortraitMenuOpen() {
+  return _isTouchMenuOpen();
+}
+
+function _syncDockRowMode(dock, bounds = _dockWorkspaceBounds()) {
+  if (!dock) return;
+  const touchPortrait = _isTouchPortrait();
+  const touchLandscape = _isTouchLandscape();
+  const compactTouchChips = _usesCompactTouchChips();
+  const menuOpen = _isTouchMenuOpen();
+  const pagedTouchDock = touchPortrait || (touchLandscape && menuOpen);
+  const stackedTouchPages = touchPortrait && menuOpen;
+  const desktopChatbarDock = !!_desktopChatbarDockRect(bounds);
+  const previousPaged = dock.classList.contains('dock-paged-row');
+  const previousStacked = dock.classList.contains('dock-stacked-pages');
+  const previousPageSize = Math.max(44, (previousStacked ? dock.clientHeight : dock.clientWidth)
+    || (previousStacked ? TOUCH_DOCK_STACK_PAGE_HEIGHT : TOUCH_DOCK_ROW_PAGE_WIDTH));
+  const previousScroll = previousStacked ? (dock.scrollTop || 0) : (dock.scrollLeft || 0);
+  const previousPageIndex = previousPaged ? Math.round(previousScroll / previousPageSize) : 0;
+  const available = Math.max(44, bounds.right - bounds.left - 16);
+  const touchPageWidth = stackedTouchPages ? TOUCH_DOCK_STACK_PAGE_WIDTH : TOUCH_DOCK_ROW_PAGE_WIDTH;
+  const maxWidth = pagedTouchDock ? Math.min(available, touchPageWidth) : available;
+  dock.style.maxWidth = `${Math.round(maxWidth)}px`;
+  if (stackedTouchPages) {
+    dock.style.height = `${Math.round(TOUCH_DOCK_STACK_PAGE_HEIGHT)}px`;
+  } else {
+    dock.style.removeProperty('height');
+  }
+  dock.classList.toggle('dock-single-row', touchLandscape && !pagedTouchDock);
+  dock.classList.toggle('dock-paged-row', pagedTouchDock);
+  dock.classList.toggle('dock-stacked-pages', stackedTouchPages);
+  dock.classList.toggle('dock-chatbar-row', desktopChatbarDock);
+  dock.classList.toggle('dock-compact-chips', compactTouchChips);
+  _syncDockOverflowState(dock);
+  if (previousPaged !== pagedTouchDock || previousStacked !== stackedTouchPages) {
+    requestAnimationFrame(() => {
+      if (!dock.classList.contains('dock-paged-row')) {
+        dock.scrollLeft = 0;
+        dock.scrollTop = 0;
+        return;
+      }
+      const pages = [...dock.querySelectorAll('.minimized-dock-page')];
+      const stacked = dock.classList.contains('dock-stacked-pages');
+      const targetPage = pages[Math.max(0, Math.min(pages.length - 1, previousPageIndex))];
+      const maxScroll = stacked
+        ? Math.max(0, dock.scrollHeight - dock.clientHeight)
+        : Math.max(0, dock.scrollWidth - dock.clientWidth);
+      const next = targetPage
+        ? Math.max(0, Math.min(maxScroll, stacked
+            ? targetPage.offsetTop - dock.clientTop
+            : targetPage.offsetLeft - dock.clientLeft))
+        : 0;
+      if (stacked) {
+        dock.scrollTo({ top: next, behavior: 'auto' });
+      } else {
+        dock.scrollTo({ left: next, behavior: 'auto' });
+      }
+    });
+  }
+}
+
+function _syncDockOverflowState(dock) {
+  if (!dock) return;
+  if (!dock.classList.contains('dock-chatbar-row')) {
+    dock.classList.remove('dock-overflowing');
+    return;
+  }
+  const overflowing = dock.scrollWidth > dock.clientWidth + 1;
+  dock.classList.toggle('dock-overflowing', overflowing);
+  if (!overflowing && dock.scrollLeft) dock.scrollLeft = 0;
+}
+
+function _pageTouchDock(dock, direction, { wrap = false } = {}) {
+  if (!dock || !dock.classList.contains('dock-paged-row')) return false;
+  const stacked = dock.classList.contains('dock-stacked-pages');
+  const maxScroll = stacked
+    ? Math.max(0, dock.scrollHeight - dock.clientHeight)
+    : Math.max(0, dock.scrollWidth - dock.clientWidth);
+  if (maxScroll <= 1) return false;
+  const current = stacked ? (dock.scrollTop || 0) : (dock.scrollLeft || 0);
+  const rawPageOffsets = [...dock.querySelectorAll('.minimized-dock-page')]
+    .map(page => Math.max(0, Math.min(maxScroll, stacked
+      ? page.offsetTop - dock.clientTop
+      : page.offsetLeft - dock.clientLeft)))
+    .filter((offset, index, offsets) => index === 0 || Math.abs(offset - offsets[index - 1]) > 2);
+  const offsetOrigin = rawPageOffsets[0] || 0;
+  const pageOffsets = rawPageOffsets
+    .map(offset => Math.max(0, Math.min(maxScroll, offset - offsetOrigin)))
+    .filter((offset, index, offsets) => index === 0 || Math.abs(offset - offsets[index - 1]) > 2);
+  const fallbackPageWidth = dock.classList.contains('dock-stacked-pages')
+    ? TOUCH_DOCK_STACK_PAGE_HEIGHT
+    : TOUCH_DOCK_ROW_PAGE_WIDTH;
+  const page = Math.max(44, (stacked ? dock.clientHeight : dock.clientWidth) || fallbackPageWidth);
+  let next = direction > 0
+    ? Math.min(maxScroll, current + page)
+    : Math.max(0, current - page);
+  if (pageOffsets.length) {
+    if (direction > 0) {
+      next = pageOffsets.find(offset => offset > current + 2);
+      if (next == null) next = wrap ? pageOffsets[0] : maxScroll;
+    } else {
+      next = [...pageOffsets].reverse().find(offset => offset < current - 2);
+      if (next == null) next = wrap ? pageOffsets[pageOffsets.length - 1] : 0;
+    }
+  } else if (wrap) {
+    if (direction > 0 && current >= maxScroll - 2) next = 0;
+    if (direction < 0 && current <= 2) next = maxScroll;
+  }
+  if (Math.abs(next - current) < 2) return false;
+  try {
+    if (stacked) dock.scrollTo({ top: next, behavior: 'smooth' });
+    else dock.scrollTo({ left: next, behavior: 'smooth' });
+  } catch (_) {
+    if (stacked) dock.scrollTop = next;
+    else dock.scrollLeft = next;
+  }
+  _settleTouchDockPage(dock, next, stacked);
+  return true;
+}
+
+function _settleTouchDockPage(dock, next, stacked) {
+  if (!stacked || !dock) return;
+  if (dock._touchDockSettleTimers) {
+    dock._touchDockSettleTimers.forEach(clearTimeout);
+  }
+  const forcePage = () => {
+    const current = dock.scrollTop || 0;
+    if (Math.abs(current - next) <= 2) return;
+    const previousSnap = dock.style.scrollSnapType;
+    dock.style.scrollSnapType = 'none';
+    dock.scrollTop = next;
+    requestAnimationFrame(() => {
+      dock.scrollTop = next;
+      dock.style.scrollSnapType = previousSnap;
+    });
+  };
+  dock._touchDockSettleTimers = [
+    setTimeout(forcePage, 260),
+    setTimeout(forcePage, 560),
+  ];
+}
+
+function _clampDockPosition(dock, left, top) {
+  const bounds = _dockWorkspaceBounds();
+  _syncDockRowMode(dock, bounds);
+  const width = Math.max(44, dock.offsetWidth || 44);
+  const height = Math.max(36, dock.offsetHeight || 36);
+  const minLeft = bounds.left + 8;
+  const maxLeft = Math.max(minLeft, bounds.right - width - 8);
+  const minTop = 8;
+  const maxTop = Math.max(minTop, _aboveComposerTop(height));
+  return {
+    left: Math.max(minLeft, Math.min(maxLeft, left)),
+    top: Math.max(minTop, Math.min(maxTop, top)),
+  };
+}
+
+function _clampChipPosition(left, top, width = 44, height = 44) {
+  const bounds = _dockWorkspaceBounds();
+  const minLeft = bounds.left + 4;
+  const maxLeft = Math.max(minLeft, bounds.right - width - 4);
+  const minTop = 4;
+  const maxTop = Math.max(minTop, _aboveComposerTop(height));
+  return {
+    left: Math.max(minLeft, Math.min(maxLeft, left)),
+    top: Math.max(minTop, Math.min(maxTop, top)),
+  };
+}
+
 function _applyDockPos(dock) {
-  if (!_dockPos) return;
-  dock.style.left = `${_dockPos.left}px`;
-  dock.style.top = `${_dockPos.top}px`;
+  _syncDockLayout();
+  const bounds = _dockWorkspaceBounds();
+  _syncDockRowMode(dock, bounds);
+  const chatbarDock = _desktopChatbarDockRect(bounds, dock);
+  if (chatbarDock) {
+    if (_dockPos) {
+      _dockPos = null;
+      delete _dockPosByLayout[_dockLayout];
+      _saveDockState();
+    }
+    dock.style.left = `${chatbarDock.left}px`;
+    dock.style.width = `${chatbarDock.width}px`;
+    dock.style.maxWidth = `${chatbarDock.width}px`;
+    dock.style.transform = 'none';
+    dock.style.right = 'auto';
+    dock.style.top = `${chatbarDock.top}px`;
+    dock.style.bottom = 'auto';
+    _syncDockOverflowState(dock);
+    return;
+  }
+  if (!_dockPos) {
+    dock.style.left = `${Math.round((bounds.left + bounds.right) / 2)}px`;
+    dock.style.removeProperty('width');
+    dock.style.transform = 'translateX(-50%)';
+    dock.style.right = 'auto';
+    dock.style.removeProperty('top');
+    dock.style.bottom = '';
+    _syncDockOverflowState(dock);
+    return;
+  }
+  const next = _clampDockPosition(dock, _dockPos.left, _dockPos.top);
+  _dockPos = next;
+  dock.style.left = `${next.left}px`;
+  dock.style.top = `${next.top}px`;
   dock.style.right = 'auto';
   dock.style.bottom = 'auto';
+  dock.style.removeProperty('width');
   dock.style.transform = 'none';
+  _syncDockOverflowState(dock);
+}
+
+let _dockPlacementWired = false;
+function _wireDockPlacement(dock) {
+  if (_dockPlacementWired || !dock) return;
+  _dockPlacementWired = true;
+  dock.addEventListener('wheel', (e) => {
+    if (!dock.classList.contains('dock-chatbar-row')) return;
+    if (dock.scrollWidth <= dock.clientWidth + 1) return;
+    const delta = Math.abs(e.deltaX) >= Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
+    if (!delta) return;
+    dock.scrollLeft += delta;
+    e.preventDefault();
+  }, { passive: false });
+  const schedule = () => {
+    requestAnimationFrame(() => {
+      const current = document.getElementById('minimized-dock');
+      if (!current || current.style.display === 'none') return;
+      _applyDockPos(current);
+      const hasChips = !!current.querySelector('.minimized-dock-chip');
+      const hasPagedStructure = !!current.querySelector('.minimized-dock-page');
+      const wantsPagedStructure = current.classList.contains('dock-paged-row');
+      if (hasChips && hasPagedStructure !== wantsPagedStructure) _renderDock();
+    });
+  };
+  window.addEventListener('resize', schedule);
+  if (window.visualViewport) {
+    window.visualViewport.addEventListener('resize', schedule);
+    window.visualViewport.addEventListener('scroll', schedule);
+  }
+  if (typeof ResizeObserver !== 'undefined') {
+    const ro = new ResizeObserver(schedule);
+    for (const el of [document.getElementById('attach-strip'), document.querySelector('.chat-input-bar')]) {
+      if (el) ro.observe(el);
+    }
+  }
+  const chatContainer = document.querySelector('.chat-container');
+  if (chatContainer) {
+    chatContainer.addEventListener('transitionend', (e) => {
+      if (e.propertyName === 'margin-left'
+          || e.propertyName === 'margin-right'
+          || e.propertyName === 'margin-top'
+          || e.propertyName === 'margin-bottom') {
+        schedule();
+      }
+    });
+  }
+  new MutationObserver(schedule).observe(document.body, {
+    attributes: true,
+    attributeFilter: ['class'],
+  });
+  new MutationObserver(schedule).observe(document.documentElement, {
+    attributes: true,
+    attributeFilter: ['style'],
+  });
+  const navObserver = new MutationObserver(schedule);
+  for (const el of [document.getElementById('sidebar'), document.getElementById('icon-rail')]) {
+    if (el) navObserver.observe(el, { attributes: true, attributeFilter: ['class', 'style'] });
+  }
 }
 
 // True when `chipRect` is close enough to the dock's current location that
@@ -264,12 +1206,16 @@ function _nearDock(chipRect, dock) {
 function _renderDock() {
   const dock = document.getElementById('minimized-dock');
   if (!dock) return;
+  const notifyDockRendered = () => {
+    try { window.dispatchEvent(new CustomEvent('odysseus:minimized-dock-rendered')); } catch (_) {}
+  };
   const minimizedIds = [..._state.entries()].filter(([_, s]) => s.isMinimized).map(([id]) => id);
+  if (_pruneFallbackChipPositions()) _saveDockState();
   // On mobile we ALSO keep chips around for any modal that's been
   // free-positioned on screen — even while it's open — so the chip acts as
   // a persistent toggle (tap to minimize, tap again to restore).
-  const isMobile = window.innerWidth <= 768;
-  const persistentIds = isMobile
+  const isTouchChipDock = _usesCompactTouchChips();
+  const persistentIds = isTouchChipDock
     ? [..._state.entries()].filter(([id, _]) => _chipPositions.has(id)).map(([id]) => id)
     : [];
   const allIds = Array.from(new Set([...minimizedIds, ...persistentIds]));
@@ -330,6 +1276,7 @@ function _renderDock() {
     // the empty dock stays hidden until new chips arrive.
     dock.style.cssText = '';
     dock.style.display = 'none';
+    notifyDockRendered();
     return;
   }
 
@@ -345,12 +1292,28 @@ function _renderDock() {
   // first time it re-populates after every chip was restored.
   _applyDockPos(dock);
   dock.innerHTML = '';
+  let touchPage = null;
+  let touchPageChipCount = 0;
+  const appendDockChip = (chip) => {
+    if (dock.classList.contains('dock-paged-row')) {
+      if (!touchPage || touchPageChipCount % TOUCH_DOCK_PAGE_CHIPS === 0) {
+        touchPage = document.createElement('div');
+        touchPage.className = 'minimized-dock-page';
+        dock.appendChild(touchPage);
+      }
+      touchPage.appendChild(chip);
+      touchPageChipCount += 1;
+      return;
+    }
+    dock.appendChild(chip);
+  };
   for (const id of renderIds) {
     const meta = _LABELS[id] || { label: id, icon: '' };
     const chip = document.createElement('button');
     chip.type = 'button';
     chip.className = 'minimized-dock-chip';
     chip.dataset.modalId = id;
+    if (isTouchChipDock) chip.classList.add('chip-compact-touch');
     chip.title = `Restore ${meta.label}`;
     // Restore any external data-* attributes the previous chip carried
     // (e.g. emailLibrary's data-tab-num slot-number badge).
@@ -397,16 +1360,19 @@ function _renderDock() {
     // transform: translateX(-50%) doesn't shift their `position: fixed`
     // coords. Dock-resident chips render as normal flex children.
     const pos = _chipPositions.get(id);
-    if (pos && window.innerWidth <= 768) {
+    if (pos && isTouchChipDock) {
       chip.style.setProperty('position', 'fixed', 'important');
       chip.style.setProperty('left', `${pos.left}px`, 'important');
       chip.style.setProperty('top', `${pos.top}px`, 'important');
-      chip.style.setProperty('z-index', '10020', 'important');
+      // Rest with the dock below composer popups and tool windows. Dragging
+      // temporarily raises the chip via the existing drag-only z-index.
+      chip.style.setProperty('z-index', '100', 'important');
       document.body.appendChild(chip);
     } else {
-      dock.appendChild(chip);
+      appendDockChip(chip);
     }
   }
+  _applyDockPos(dock);
 
   // FLIP: animate from old → new positions
   dock.querySelectorAll('.minimized-dock-chip').forEach(c => {
@@ -429,6 +1395,7 @@ function _renderDock() {
   // a brand-new chip is joining.
   _renderedChipIds.clear();
   for (const id of renderIds) _renderedChipIds.add(id);
+  notifyDockRendered();
 }
 
 // Lazy-build the magnetic close target. Horizontally centered; its vertical
@@ -480,7 +1447,7 @@ const LONG_PRESS_MS = 380;
 const REDOCK_RADIUS = 90;
 
 function _detachToFreeDrag(chip, dock, chipStartLeft, chipStartTop) {
-  if (chip.parentElement === dock) {
+  if (chip.parentElement === dock || dock.contains(chip)) {
     chip.style.setProperty('position', 'fixed', 'important');
     chip.style.setProperty('left', `${chipStartLeft}px`, 'important');
     chip.style.setProperty('top', `${chipStartTop}px`, 'important');
@@ -635,7 +1602,22 @@ function _wireChipDrag(chip, dock) {
   let longPressVisual = null;
   let chainState = null;
   let chipSnapZone = null;   // desktop: snap zone under the cursor while dragging a chip
+  let dragArmed = false;
+  let movedBeforeArm = false;
+  let pagedSwipeHandled = false;
   const CAPTURE_RADIUS = 70;
+
+  const suppressTrailingClick = (ms = 350) => {
+    chip._wasDragging = true;
+    setTimeout(() => { chip._wasDragging = false; }, ms);
+  };
+
+  const armDrag = () => {
+    dragArmed = true;
+    chip.classList.add('chip-long-press');
+    suppressTrailingClick();
+    if (navigator.vibrate) { try { navigator.vibrate(15); } catch {} }
+  };
 
   const cancelLongPress = () => {
     if (longPressTimer) { clearTimeout(longPressTimer); longPressTimer = null; }
@@ -643,11 +1625,37 @@ function _wireChipDrag(chip, dock) {
     chip.classList.remove('chip-long-press');
   };
 
+  const clearDragSurface = () => {
+    if (trashZone) trashZone.classList.remove('visible', 'engaged');
+    overTrash = false;
+    dock.classList.remove('dock-dragging');
+  };
+
+  const finishDragSurface = () => {
+    clearDragSurface();
+    dragging = false;
+    dragMode = null;
+  };
+
+  const clearFreeChipStyles = () => {
+    chip.style.removeProperty('transform');
+    chip.style.removeProperty('z-index');
+    chip.style.removeProperty('position');
+    chip.style.removeProperty('left');
+    chip.style.removeProperty('top');
+    chip.style.removeProperty('pointer-events');
+    chip.style.removeProperty('transition');
+    chip.classList.remove('chip-free-drag');
+  };
+
   const onPointerDown = (e) => {
     if (e.target.classList.contains('minimized-dock-x')) return;
     if (e.button !== 0 && e.pointerType === 'mouse') return;
     if (activePointerId !== null) return;
     startX = e.clientX; startY = e.clientY; dragging = false;
+    dragArmed = false;
+    movedBeforeArm = false;
+    pagedSwipeHandled = false;
     activePointerId = e.pointerId;
     // Flag global "a chip is being touched" so other touch handlers (e.g.
     // the chat container's edge-swipe-to-open-sidebar) know to stand down.
@@ -660,7 +1668,7 @@ function _wireChipDrag(chip, dock) {
     chipStartLeft = cr.left;
     chipStartTop = cr.top;
 
-    const onTouch = (e.pointerType === 'touch' || window.innerWidth <= 768);
+    const onTouch = (e.pointerType === 'touch' || _usesCompactTouchChips());
     if (onTouch) {
       const isFree = _chipPositions.has(chip.dataset.modalId);
       trashZone = _ensureTrashZone();
@@ -678,8 +1686,9 @@ function _wireChipDrag(chip, dock) {
       if (totalChips >= 2) {
         dragMode = 'chain';
         _positionTrashZoneOpposite(trashZone, chipStartTop, chip.offsetHeight);
-        // Long-press a chained chip to peel it off as a single free puck —
-        // movement before the timer fires cancels and starts chain physics.
+        // Long-press a chained chip to peel it off as a single free puck.
+        // Movement before the timer fires is ignored so quick swipes do not
+        // accidentally drag the collapsed controls.
         // Defer the visual pulse so quick taps don't see a scale-up bounce.
         longPressVisual = setTimeout(() => {
           longPressVisual = null;
@@ -688,19 +1697,28 @@ function _wireChipDrag(chip, dock) {
         longPressTimer = setTimeout(() => {
           longPressTimer = null;
           if (dragging) return; // chain already engaged
+          armDrag();
           dragMode = 'free';
-          chip.classList.remove('chip-long-press');
           _detachToFreeDrag(chip, dock, chipStartLeft, chipStartTop);
-          _chipPositions.set(chip.dataset.modalId, { left: chipStartLeft, top: chipStartTop });
+          _chipPositions.set(
+            chip.dataset.modalId,
+            _clampChipPosition(chipStartLeft, chipStartTop, chip.offsetWidth, chip.offsetHeight),
+          );
           _saveDockState();
-          chip._wasDragging = true;
-          setTimeout(() => { chip._wasDragging = false; }, 350);
-          if (navigator.vibrate) { try { navigator.vibrate(15); } catch {} }
         }, LONG_PRESS_MS);
       } else if (isFree) {
         // Lone free chip — single-puck drag.
         dragMode = 'free';
         _positionTrashZoneOpposite(trashZone, chipStartTop, chip.offsetHeight);
+        longPressVisual = setTimeout(() => {
+          longPressVisual = null;
+          chip.classList.add('chip-long-press');
+        }, 180);
+        longPressTimer = setTimeout(() => {
+          longPressTimer = null;
+          if (dragging) return;
+          armDrag();
+        }, LONG_PRESS_MS);
       } else {
         // Lone dock chip — keep move-dock so the user can reposition the
         // dock pad (long-press still promotes to free-drag).
@@ -716,19 +1734,17 @@ function _wireChipDrag(chip, dock) {
         longPressTimer = setTimeout(() => {
           longPressTimer = null;
           if (dragging) return; // committed to move-dock already
+          armDrag();
           dragMode = 'free';
-          chip.classList.remove('chip-long-press');
           _detachToFreeDrag(chip, dock, chipStartLeft, chipStartTop);
           _positionTrashZoneOpposite(trashZone, chipStartTop, chip.offsetHeight);
           // Stick the chip where it was so it stays detached even if the user
           // lifts their finger without dragging.
-          _chipPositions.set(chip.dataset.modalId, { left: chipStartLeft, top: chipStartTop });
+          _chipPositions.set(
+            chip.dataset.modalId,
+            _clampChipPosition(chipStartLeft, chipStartTop, chip.offsetWidth, chip.offsetHeight),
+          );
           _saveDockState();
-          // Suppress the trailing click so this hold doesn't immediately
-          // restore/minimize the modal under the finger.
-          chip._wasDragging = true;
-          setTimeout(() => { chip._wasDragging = false; }, 350);
-          if (navigator.vibrate) { try { navigator.vibrate(15); } catch {} }
         }, LONG_PRESS_MS);
       }
       document.addEventListener('pointermove', onPointerMove);
@@ -748,6 +1764,15 @@ function _wireChipDrag(chip, dock) {
       dockStartLeft = dr.left;
       dockStartTop = dr.top;
     }
+    longPressVisual = setTimeout(() => {
+      longPressVisual = null;
+      chip.classList.add('chip-long-press');
+    }, 180);
+    longPressTimer = setTimeout(() => {
+      longPressTimer = null;
+      if (dragging) return;
+      armDrag();
+    }, LONG_PRESS_MS);
     chip.setPointerCapture(e.pointerId);
     chip.addEventListener('pointermove', onPointerMove);
     chip.addEventListener('pointerup', onPointerUp, { once: true });
@@ -760,8 +1785,30 @@ function _wireChipDrag(chip, dock) {
     // Touch fingers drift a few pixels even on a "still" tap, so the touch
     // threshold is generous — otherwise a tap-to-restore reads as a drag
     // and the click gets eaten when the chain settles.
-    const DRAG_THRESHOLD = (e.pointerType === 'touch' || window.innerWidth <= 768) ? 14 : 5;
+    const DRAG_THRESHOLD = (e.pointerType === 'touch' || _usesCompactTouchChips()) ? 14 : 5;
     if (!dragging && Math.hypot(dx, dy) < DRAG_THRESHOLD) return;
+    if (!dragging && !dragArmed && dock.classList.contains('dock-paged-row')) {
+      const stackedDock = dock.classList.contains('dock-stacked-pages');
+      const horizontalSwipe = !stackedDock && Math.abs(dx) > Math.abs(dy) * 1.25;
+      const verticalStackSwipe = stackedDock && Math.abs(dy) > Math.abs(dx) * 1.05;
+      if (horizontalSwipe || verticalStackSwipe) {
+        cancelLongPress();
+        movedBeforeArm = true;
+        if (!pagedSwipeHandled) {
+          const direction = verticalStackSwipe ? (dy < 0 ? 1 : -1) : (dx < 0 ? 1 : -1);
+          pagedSwipeHandled = _pageTouchDock(dock, direction, { wrap: stackedDock });
+        }
+        suppressTrailingClick(220);
+        e.preventDefault && e.preventDefault();
+        return;
+      }
+    }
+    if (!dragging && !dragArmed) {
+      movedBeforeArm = true;
+      suppressTrailingClick(160);
+      e.preventDefault && e.preventDefault();
+      return;
+    }
     if (!dragging) {
       dragging = true;
       cancelLongPress();
@@ -798,7 +1845,8 @@ function _wireChipDrag(chip, dock) {
     // window + snapping it there (top → maximize/fullscreen, right → right
     // dock). Releasing in the zone commits it (see onPointerUp).
     if (e.pointerType !== 'touch' && window.innerWidth > 768) {
-      const z = previewZoneAt(e.clientX, e.clientY, modal);
+      const previewModal = document.getElementById(chip.dataset.modalId);
+      const z = previewZoneAt(e.clientX, e.clientY, previewModal);
       // Ignore the bottom zone — the dock lives at the bottom, so horizontal
       // chip reordering must not get hijacked into a bottom-half snap.
       chipSnapZone = (z && z.name !== 'bottom-half') ? z : null;
@@ -879,8 +1927,11 @@ function _wireChipDrag(chip, dock) {
       // Move-dock: reposition the entire dock element. On touch, the whole
       // chain also interacts with the trash zone — drop on X to close every
       // chip in the dock.
-      let newLeft = Math.max(8, Math.min(window.innerWidth  - dock.offsetWidth  - 8, dockStartLeft + dx));
-      let newTop  = Math.max(8, Math.min(window.innerHeight - dock.offsetHeight - 8, dockStartTop  + dy));
+      let { left: newLeft, top: newTop } = _clampDockPosition(
+        dock,
+        dockStartLeft + dx,
+        dockStartTop + dy,
+      );
 
       if (trashZone) {
         const tz = trashZone.getBoundingClientRect();
@@ -918,6 +1969,10 @@ function _wireChipDrag(chip, dock) {
     chip.removeEventListener('pointermove', onPointerMove);
     activePointerId = null;
     cancelLongPress();
+    dragArmed = false;
+    if (movedBeforeArm && !dragging) suppressTrailingClick(160);
+    movedBeforeArm = false;
+    pagedSwipeHandled = false;
     // Clear the global drag flag so the chat container's edge-swipe handler
     // can resume opening the sidebar on plain swipes.
     setTimeout(() => { window._chipDragging = false; }, 0);
@@ -931,7 +1986,23 @@ function _wireChipDrag(chip, dock) {
       const id = chip.dataset.modalId;
       restore(id);
       const modal = document.getElementById(id);
-      if (modal) requestAnimationFrame(() => requestAnimationFrame(() => snapModalToZone(modal, zone)));
+      if (modal) requestAnimationFrame(() => requestAnimationFrame(() => {
+        const edgeDockZone = zone.name === 'left-half'
+          || zone.name === 'right-half'
+          || zone.name === 'top-half'
+          || zone.name === 'bottom-half';
+        if (edgeDockZone && _isFullExpanded(modal)) {
+          const content = _modalWindowContent(modal);
+          try { restoreModalSnap(modal); } catch (_) {}
+          _clearFullExpandClasses(modal);
+          if (content) {
+            delete content._fullExpandReturnState;
+            _releaseWindowDockState(modal, content);
+          }
+          _syncExpandButton(modal.querySelector?.('.modal-expand-btn'), modal);
+        }
+        snapModalToZone(modal, zone);
+      }));
       return;
     }
     if (dragMode === 'chain' && chainState) {
@@ -959,7 +2030,7 @@ function _wireChipDrag(chip, dock) {
         setTimeout(() => {
           for (const id of ids) close(id);
           dock.style.cssText = '';
-          _saveDockState();
+          _resetDockToDefault(dock);
         }, 320);
       } else if (dragging) {
         // Released away from X: settle the chain into a tight line in the
@@ -970,18 +2041,32 @@ function _wireChipDrag(chip, dock) {
         const dirX = state.trailDirX / tMag;
         const dirY = state.trailDirY / tMag;
         const spacing = state.linkSpacing;
+        let minLeft = Infinity;
+        let minTop = Infinity;
+        let maxRight = -Infinity;
+        let maxBottom = -Infinity;
         for (const i of state.order) {
           const l = state.links[i];
           if (i !== state.grabbedIdx) {
             l.x = l.pred.x + dirX * spacing;
             l.y = l.pred.y + dirY * spacing;
           }
-          const clampedLeft = Math.max(4, Math.min(window.innerWidth - l.width - 4, l.x));
-          const clampedTop  = Math.max(4, Math.min(window.innerHeight - l.height - 4, l.y));
-          _chipPositions.set(l.chip.dataset.modalId, { left: clampedLeft, top: clampedTop });
+          minLeft = Math.min(minLeft, l.x);
+          minTop = Math.min(minTop, l.y);
+          maxRight = Math.max(maxRight, l.x + l.width);
+          maxBottom = Math.max(maxBottom, l.y + l.height);
         }
         dock.style.opacity = '';
-        _saveDockState();
+        if (_isDefaultDockDrop(dock, minLeft, minTop, maxRight - minLeft, maxBottom - minTop)) {
+          _chipPositions.clear();
+          _resetDockToDefault(dock);
+        } else {
+          for (const i of state.order) {
+            const l = state.links[i];
+            _chipPositions.set(l.chip.dataset.modalId, _clampChipPosition(l.x, l.y, l.width, l.height));
+          }
+          _saveDockState();
+        }
         _renderDock();
       } else {
         // Touch without movement: nothing to do (RAF never started, dock
@@ -1041,6 +2126,15 @@ function _wireChipDrag(chip, dock) {
           if (d < nearestDist) { nearestDist = d; nearest = or; }
         });
 
+        if (_isDefaultDockDrop(dock, dropLeft, dropTop, myW, myH)) {
+          _chipPositions.clear();
+          _resetDockToDefault(dock);
+          clearFreeChipStyles();
+          finishDragSurface();
+          _renderDock();
+          return;
+        }
+
         if (nearest && nearestDist < myW + SNAP) {
           // Snap adjacent to the nearest chip — pick the side closest to
           // where the finger let go so it feels like a natural collision.
@@ -1058,36 +2152,20 @@ function _wireChipDrag(chip, dock) {
           }
         } else if (_nearDock(r, dock)) {
           // Dropped near the dock chain — re-dock.
-          _chipPositions.delete(myId);
-          chip.style.removeProperty('transform');
-          chip.style.removeProperty('z-index');
-          chip.style.removeProperty('position');
-          chip.style.removeProperty('left');
-          chip.style.removeProperty('top');
-          chip.style.removeProperty('pointer-events');
-          chip.style.removeProperty('transition');
-          chip.classList.remove('chip-free-drag');
+          _chipPositions.clear();
+          clearFreeChipStyles();
+          finishDragSurface();
           _saveDockState();
           _renderDock();
           return;
         }
 
-        const clampedLeft = Math.max(4, Math.min(window.innerWidth - myW - 4, dropLeft));
-        const clampedTop  = Math.max(4, Math.min(window.innerHeight - myH - 4, dropTop));
-        _chipPositions.set(myId, { left: clampedLeft, top: clampedTop });
-        chip.style.removeProperty('transform');
-        chip.style.removeProperty('z-index');
-        chip.style.removeProperty('position');
-        chip.style.removeProperty('left');
-        chip.style.removeProperty('top');
-        chip.style.removeProperty('pointer-events');
-        chip.style.removeProperty('transition');
-        chip.classList.remove('chip-free-drag');
+        _chipPositions.set(myId, _clampChipPosition(dropLeft, dropTop, myW, myH));
+        clearFreeChipStyles();
         _saveDockState();
         _renderDock();
       }
-      if (trashZone) trashZone.classList.remove('visible', 'engaged');
-      overTrash = false;
+      clearDragSurface();
     } else if (dragMode === 'move-dock' && dragging && overTrash) {
       // Dropped the whole chain onto the X — close every chipped modal.
       // Only the ids that actually have a rendered chip (i.e. currently
@@ -1113,20 +2191,26 @@ function _wireChipDrag(chip, dock) {
         dock.style.removeProperty('top');
         dock.style.removeProperty('right');
         dock.style.removeProperty('bottom');
-        _saveDockState();
+        _resetDockToDefault(dock);
       }, 320);
-      if (trashZone) trashZone.classList.remove('visible', 'engaged');
-      overTrash = false;
-      dock.classList.remove('dock-dragging');
+      clearDragSurface();
+    } else if (dragMode === 'move-dock' && dragging) {
+      const rect = dock.getBoundingClientRect();
+      if (_isDefaultDockDrop(dock, rect.left, rect.top, rect.width, rect.height)) {
+        _resetDockToDefault(dock);
+      } else {
+        _dockPos = _clampDockPosition(dock, rect.left, rect.top);
+        _saveDockState();
+      }
+      clearDragSurface();
+      _applyDockPos(dock);
     } else if (dragMode === 'reorder') {
       chip.classList.remove('dragging');
       chip.style.transition = 'transform 0.25s cubic-bezier(0.34, 1.56, 0.64, 1)';
       chip.style.transform = '';
       chip.style.zIndex = '';
     } else {
-      dock.classList.remove('dock-dragging');
-      if (trashZone) trashZone.classList.remove('visible', 'engaged');
-      overTrash = false;
+      clearDragSurface();
     }
     if (dragging) {
       chip._wasDragging = true;
@@ -1154,6 +2238,7 @@ export function register(id, { restoreFn, closeFn, railBtnId, sidebarBtnId, labe
     btnIds,
     isMinimized: false,
     restoreMinHeight: '',
+    lastActiveAt: 0,
   });
   // Auto-stack: whichever modal becomes visible last sits on top of any
   // already-open modals. The various tool open() functions (gallery,
@@ -1168,9 +2253,7 @@ export function register(id, { restoreFn, closeFn, railBtnId, sidebarBtnId, labe
     const obs = new MutationObserver(() => {
       const vis = _isVisible();
       if (vis && !_modalEl._mmAutoStackLast) {
-        _bringToFront(_modalEl);
-        _applyRememberedDock(id);
-        _emitModalOpened(id, _modalEl);
+        _handleModalShown(id, _modalEl);
       }
       _modalEl._mmAutoStackLast = vis;
     });
@@ -1179,10 +2262,9 @@ export function register(id, { restoreFn, closeFn, railBtnId, sidebarBtnId, labe
     // If it's already visible at register time (e.g. modal opened before
     // register completes), bump it once now too.
     if (_modalEl._mmAutoStackLast) {
-      _bringToFront(_modalEl);
-      _applyRememberedDock(id);
-      _emitModalOpened(id, _modalEl);
+      _handleModalShown(id, _modalEl);
     }
+    _settleMobileSheet(_modalEl);
   }
   // Allow callers to supply their own chip label/icon (path d="..." or
   // full <svg>...</svg>) so ephemeral things like FX popups can dock
@@ -1237,9 +2319,7 @@ export function minimize(id) {
     // If this window is edge-docked (right/left), SUSPEND the dock: release
     // the body push so the chat returns to full width while the window is
     // minimized, but keep the dock so restoring the chip snaps it back in.
-    if (modal.classList.contains('modal-right-docked')
-        || modal.classList.contains('modal-left-docked')
-        || modal.classList.contains('email-snap-left')) {
+    if (_isEdgeDocked(modal)) {
       try { suspendDock(modal); } catch (e) { console.warn('suspendDock on minimize failed', e); }
     }
     modal.classList.add('hidden');
@@ -1271,10 +2351,13 @@ export function restore(id) {
     // should bring this tool to the front, not leave it stuck behind one with
     // a higher static z-index.
     _bringToFront(modal);
-    // If the window was edge-docked when minimized, re-apply the dock so the
-    // chat nudges back in and the window returns exactly where it was.
-    try { resumeDock(modal); } catch (e) { console.warn('resumeDock on restore failed', e); }
+    if (!_scheduleAndroidDefaultDock(id, modal)) {
+      // If the window was edge-docked when minimized, re-apply the dock so the
+      // chat nudges back in and the window returns exactly where it was.
+      try { resumeDock(modal); } catch (e) { console.warn('resumeDock on restore failed', e); }
+    }
     _emitModalOpened(id, modal);
+    _settleMobileSheet(modal);
   }
   s.isMinimized = false;
   _setBadge(s.btnIds, false);
@@ -1289,10 +2372,10 @@ export function restore(id) {
 }
 
 /**
- * If the modal is currently MINIMIZED, restore it and return true.
- * Otherwise return false so the caller falls through to its own
- * open/close handling. We deliberately do NOT minimize on toggle —
- * that's the `_` button's job, not the rail/sidebar button's job.
+ * Sidebar/rail tool toggle:
+ *   minimized -> restore
+ *   visible on mobile -> minimize
+ *   missing/closed -> false so the caller can open it fresh
  */
 export function toggle(id) {
   const s = _state.get(id);
@@ -1300,6 +2383,8 @@ export function toggle(id) {
   const modal = document.getElementById(id);
   if (!modal) { _state.delete(id); return false; }
   if (s.isMinimized) return restore(id);
+  const visible = !modal.classList.contains('hidden') && getComputedStyle(modal).display !== 'none';
+  if (visible && _isMobileSheetViewport()) return minimize(id);
   return false;
 }
 
@@ -1310,9 +2395,7 @@ export function close(id) {
   const modalBeforeClose = document.getElementById(id);
   const contentBeforeClose = modalBeforeClose?.querySelector?.('.modal-content');
   const suspendedDockSide = contentBeforeClose?._dockSuspended
-    || (modalBeforeClose?.classList?.contains('modal-left-docked') ? 'left'
-        : modalBeforeClose?.classList?.contains('modal-right-docked') ? 'right'
-          : null);
+    || _edgeDockSide(modalBeforeClose, contentBeforeClose);
   const shouldRememberDock = s.isMinimized && !!suspendedDockSide;
   if (shouldRememberDock) _rememberDock(id, suspendedDockSide);
   else _forgetDock(id);
@@ -1328,7 +2411,7 @@ export function close(id) {
     // Tear down the live dock push/classes before hiding. If this close came
     // from a minimized dock chip, the side was persisted above and register()
     // will intentionally re-apply it on the next open.
-    if (modal.classList.contains('modal-right-docked') || modal.classList.contains('modal-left-docked')) {
+    if (_isEdgeDocked(modal) && !modal.classList.contains('email-snap-left')) {
       try { clearRightDock(modal); } catch (e) { console.warn('clearRightDock on close failed', e); }
     }
     modal.classList.add('hidden');
@@ -1349,51 +2432,67 @@ export function close(id) {
   _renderDock();
 }
 
-/** Inject a minimize (`_`) button next to the close button in a modal.
- * Skips if a minimize button already exists (any class containing "minimize"). */
+function _wireMinimizeButton(btn, modalId) {
+  if (!btn || btn.dataset.modalsManagerBound) return;
+  btn.dataset.modalsManagerBound = '1';
+  btn.addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    minimize(modalId);
+  }, true);
+}
+
+function _injectExpandButton(header, modal, modalId, minBtn, closeBtn) {
+  if (!header || header.querySelector('.modal-expand-btn, [data-full-expand]')) {
+    _syncExpandButton(header?.querySelector?.('.modal-expand-btn, [data-full-expand]'), modal);
+    return;
+  }
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'modal-expand-btn';
+  btn.dataset.fullExpand = '1';
+  btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H3v5"/><path d="M16 3h5v5"/><path d="M21 16v5h-5"/><path d="M3 16v5h5"/></svg>';
+  btn.style.flexShrink = '0';
+  btn.addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    toggleFullExpand(modalId);
+  }, true);
+  _syncExpandButton(btn, modal);
+  if (closeBtn?.parentNode) closeBtn.parentNode.insertBefore(btn, closeBtn);
+  else if (minBtn?.parentNode) minBtn.parentNode.insertBefore(btn, minBtn.nextSibling);
+  else header.appendChild(btn);
+}
+
+/** Inject window controls next to the close button in a modal. */
 export function injectMinimizeButton(modal, modalId) {
   const header = modal.querySelector('.modal-header');
   if (!header) return;
-  if (header.querySelector('.modal-minimize-btn, .minimize-btn, [data-minimize]')) {
-    // An existing minimize button is present — wire it to the manager instead
-    const existing = header.querySelector('.minimize-btn, [data-minimize]');
-    if (existing && !existing.dataset._modalsBound) {
-      existing.dataset._modalsBound = '1';
-      existing.addEventListener('click', (e) => {
-        e.stopPropagation();
-        minimize(modalId);
-      }, true);
-    }
-    return;
-  }
   const closeBtn = header.querySelector('.close-btn, .modal-close');
-  const btn = document.createElement('button');
-  btn.type = 'button';
-  btn.className = 'modal-minimize-btn';
-  btn.title = 'Minimize';
-  btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="5" y1="18" x2="19" y2="18"/></svg>';
-  // Anchor the _/X pair to the right edge regardless of the header's
-  // justify-content. Some headers (cookbook) use `space-between`, which
-  // would otherwise distribute three children as left/center/right and
-  // strand the `_` in the middle. `margin-left:auto` eats the free space
-  // to the left so `_` + close sit snug at the right.
-  btn.style.flexShrink = '0';
-  btn.style.marginLeft = 'auto';
+  let minBtn = header.querySelector('.modal-minimize-btn, .minimize-btn, [data-minimize]');
+  if (!minBtn) {
+    minBtn = document.createElement('button');
+    minBtn.type = 'button';
+    minBtn.className = 'modal-minimize-btn';
+    minBtn.title = 'Minimize';
+    minBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="5" y1="18" x2="19" y2="18"/></svg>';
+    // Anchor the _/expand/X group to the right edge regardless of the header's
+    // justify-content. Some headers (cookbook) use `space-between`, which
+    // would otherwise distribute children across the title bar.
+    minBtn.style.flexShrink = '0';
+    minBtn.style.marginLeft = 'auto';
+    if (closeBtn && closeBtn.parentNode) closeBtn.parentNode.insertBefore(minBtn, closeBtn);
+    else header.appendChild(minBtn);
+  }
   if (closeBtn) {
     // The close button may carry its own left margin (e.g. compare's inline
     // "margin-left:8px") meant to separate it from the title when it stood
-    // alone. Now that `_` sits to its left, that margin becomes a stray gap
-    // between the two buttons — zero it. The minimize button's own
-    // margin-right (2px, from .modal-minimize-btn) provides the gap.
+    // alone. The shared control group provides its own gaps.
     closeBtn.style.marginLeft = '0';
     closeBtn.style.flexShrink = '0';
   }
-  btn.addEventListener('click', (e) => {
-    e.stopPropagation();
-    minimize(modalId);
-  });
-  if (closeBtn && closeBtn.parentNode) closeBtn.parentNode.insertBefore(btn, closeBtn);
-  else header.appendChild(btn);
+  _wireMinimizeButton(minBtn, modalId);
+  _injectExpandButton(header, modal, modalId, minBtn, closeBtn);
 }
 
 // ── Auto-wire fallback for modals not explicitly registered ──
@@ -1417,6 +2516,7 @@ const _AUTO_WIRE = {
   'settings-modal':       { rail: null,             sidebar: 'tool-settings-btn' },
   'compare-model-overlay':{ rail: 'rail-compare',   sidebar: 'tool-compare-btn' },
   'ge-shortcuts-modal':   { rail: null,             sidebar: null },
+  'android-connect-modal':{ rail: null,             sidebar: null },
   // Prompt window opens from the overflow menu (no rail/sidebar button), but
   // wiring it here makes tab-down use the new .minimized-dock-chip instead of
   // the legacy .modal-dock-item.
@@ -1448,6 +2548,52 @@ function _autoRegister(id) {
   return _state.get(id);
 }
 
+function _minimizeDockedModal(modal, context = 'dock') {
+  if (!modal) return false;
+  const id = modal.id || '';
+
+  if (id === 'notes-pane') {
+    try { suspendDock(modal); } catch (err) { console.warn(`suspendDock on notes ${context} failed`, err); }
+    const minBtn = document.getElementById('notes-minimize-btn');
+    if (minBtn) {
+      minBtn.click();
+      return true;
+    }
+    if (!_state.has('notes-panel') && _AUTO_WIRE['notes-panel']) _autoRegister('notes-panel');
+    if (_state.has('notes-panel')) {
+      minimize('notes-panel');
+      return true;
+    }
+  }
+
+  if (id) {
+    if (!_state.has(id) && _AUTO_WIRE[id]) _autoRegister(id);
+    if (_state.has(id)) {
+      minimize(id);
+      return true;
+    }
+  }
+
+  try { suspendDock(modal); } catch (err) { console.warn(`suspendDock on dock ${context} failed`, err); }
+  modal.classList?.add('hidden', 'modal-minimized');
+  if (modal.style) modal.style.display = 'none';
+  return true;
+}
+
+window.addEventListener('odysseus:edge-dock-minimize', (e) => {
+  if (_minimizeDockedModal(e.detail?.modal, 'handle minimize')) {
+    e.preventDefault();
+  }
+});
+
+window.addEventListener('odysseus:edge-dock-replace', (e) => {
+  const modal = e.detail?.modal;
+  if (!modal || modal === e.detail?.replacement) return;
+  if (_minimizeDockedModal(modal, 'replace')) {
+    e.preventDefault();
+  }
+});
+
 // Watch the document for tool modals being added/shown and inject the `_`
 // button next to the close button. We do NOT pre-register here — only inject
 // the button. Registration happens when the modal is actually minimized,
@@ -1457,22 +2603,92 @@ function _scanAndWire() {
     const modal = document.getElementById(id);
     if (!modal) continue;
     injectMinimizeButton(modal, id);
+    if (_isModalVisible(modal)) _scheduleAndroidDefaultDock(id, modal);
   }
 }
-const _scanTimer = setInterval(_scanAndWire, 1000);
-// First scan after DOM ready
-if (document.readyState !== 'loading') {
-  setTimeout(_scanAndWire, 100);
-} else {
-  document.addEventListener('DOMContentLoaded', () => setTimeout(_scanAndWire, 100));
+
+let _autoWireScanQueued = false;
+let _autoWireObserver = null;
+
+function _queueAutoWireScan() {
+  if (_autoWireScanQueued) return;
+  _autoWireScanQueued = true;
+  requestAnimationFrame(() => {
+    _autoWireScanQueued = false;
+    _scanAndWire();
+  });
 }
+
+function _nodeMayContainAutoWireModal(node) {
+  if (!node || node.nodeType !== 1) return false;
+  if (_AUTO_WIRE[node.id]) return true;
+  const classes = node.classList;
+  if (classes && (
+    classes.contains('modal')
+    || classes.contains('research-overlay')
+    || classes.contains('notes-pane')
+    || classes.contains('notes-pane-backdrop')
+  )) {
+    return true;
+  }
+  if (!node.querySelector) return false;
+  return !!node.querySelector('.modal, .research-overlay, .notes-pane, .notes-pane-backdrop');
+}
+
+function _wireAutoWireScanner() {
+  // First scan after DOM ready catches the built-in hidden modals. After that,
+  // desktop uses mutation/focus resyncs so many open windows do not force a
+  // full document scan every second. Android keeps the interval because the
+  // landscape dock needs to react to WebView timing quirks after tool opens.
+  const runFirstScan = () => setTimeout(_scanAndWire, 100);
+  if (document.readyState !== 'loading') {
+    runFirstScan();
+  } else {
+    document.addEventListener('DOMContentLoaded', runFirstScan, { once: true });
+  }
+
+  if (_isOdysseusAndroidApp()) {
+    return setInterval(_scanAndWire, 1000);
+  }
+
+  if (typeof MutationObserver !== 'undefined') {
+    _autoWireObserver = new MutationObserver((mutations) => {
+      for (const mutation of mutations) {
+        for (const node of mutation.addedNodes || []) {
+          if (_nodeMayContainAutoWireModal(node)) {
+            _queueAutoWireScan();
+            return;
+          }
+        }
+      }
+    });
+    const observeBody = () => {
+      if (document.body) {
+        _autoWireObserver.observe(document.body, { childList: true, subtree: true });
+      }
+    };
+    if (document.body) observeBody();
+    else document.addEventListener('DOMContentLoaded', observeBody, { once: true });
+  }
+
+  window.addEventListener('focus', _queueAutoWireScan);
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) _queueAutoWireScan();
+  });
+  return null;
+}
+const _scanTimer = _wireAutoWireScanner();
 
 // Tools that survive a swipe-down as a dock chip. Anything else falls
 // through to the legacy close handler and goes away entirely.
 const _SWIPE_DOWN_MINIMIZES = new Set([
   'cookbook-modal',
   'calendar-modal',
+  'doclib-modal',
   'email-lib-modal',
+  'gallery-modal',
+  'research-overlay',
+  'tasks-modal',
 ]);
 // Same idea but matched by id prefix — so dynamically-created modals
 // (per-email reader tabs) survive swipe-down too.
@@ -1524,9 +2740,7 @@ window.addEventListener('modal-dismissed', (e) => {
   const modal = document.getElementById(id);
   if (modal) {
     const isEmailModal = id === 'email-lib-modal' || id.startsWith('email-reader-');
-    if (modal.classList.contains('modal-right-docked')
-        || modal.classList.contains('modal-left-docked')
-        || modal.classList.contains('email-snap-left')) {
+    if (_isEdgeDocked(modal)) {
       try { suspendDock(modal); } catch (err) { console.warn('suspendDock on dismissed failed', err); }
     }
     if (isEmailModal) _clearEmailSplitAfterMinimize();
@@ -1557,4 +2771,47 @@ document.addEventListener('click', (e) => {
   }
 }, true);
 
-export default { register, unregister, isRegistered, isMinimized, minimize, restore, toggle, close, injectMinimizeButton };
+function _syncFullExpandViewportState() {
+  _syncAllExpandButtons();
+  _scheduleFullExpandRefitAll();
+}
+
+function _observeFullExpandFrameChanges() {
+  if (typeof MutationObserver === 'undefined') return;
+  const targets = [
+    document.documentElement,
+    document.body,
+    document.getElementById('sidebar'),
+    document.getElementById('icon-rail'),
+    document.getElementById('chat-container'),
+  ].filter(Boolean);
+  if (!targets.length) return;
+  if (_fullExpandFrameObserver) _fullExpandFrameObserver.disconnect();
+  _fullExpandFrameObserver = new MutationObserver(_scheduleFullExpandRefitAll);
+  targets.forEach((target) => {
+    _fullExpandFrameObserver.observe(target, {
+      attributes: true,
+      attributeFilter: ['class', 'style', 'data-side', 'data-state', 'aria-expanded'],
+    });
+  });
+}
+
+window.addEventListener('resize', _syncFullExpandViewportState);
+window.addEventListener('orientationchange', _syncFullExpandViewportState);
+window.addEventListener('odysseus:cutoutchange', _syncFullExpandViewportState);
+if (window.visualViewport) {
+  window.visualViewport.addEventListener('resize', _syncFullExpandViewportState);
+}
+if (screen.orientation && screen.orientation.addEventListener) {
+  screen.orientation.addEventListener('change', _syncFullExpandViewportState);
+}
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', _observeFullExpandFrameChanges, { once: true });
+} else {
+  _observeFullExpandFrameChanges();
+}
+
+const modalManagerApi = { register, unregister, isRegistered, isMinimized, minimize, restore, toggle, close, toggleFullExpand, injectMinimizeButton };
+try { window.Modals = modalManagerApi; } catch (_) {}
+
+export default modalManagerApi;

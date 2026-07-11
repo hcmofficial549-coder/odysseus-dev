@@ -87,6 +87,7 @@ NON_ADMIN_BLOCKED_TOOLS = BUILTIN_EMAIL_TOOLS | {
 # (read_file, grep, glob, ls) instead of freestyle shell.
 PLAN_MODE_READONLY_TOOLS = {
     "read_file",
+    "read_attachment",
     "grep",
     "glob",
     "ls",
@@ -116,6 +117,7 @@ PLAN_MODE_READONLY_TOOLS = {
     "search_hf_models",
     "list_serve_presets",
     "list_cookbook_servers",
+    "manage_gallery",
     "resolve_contact",
     "chat_with_model",
     "ask_teacher",
@@ -152,7 +154,8 @@ _PLAN_MODE_KNOWN_MUTATORS = {
     "download_attachment",
     "download_model", "serve_model",
     "stop_served_model", "cancel_download", "adopt_served_model", "serve_preset",
-    "generate_image", "edit_image", "trigger_research", "manage_research",
+    "generate_image", "generate_video", "generate_music", "runcomfy_media",
+    "edit_image", "trigger_research", "manage_research",
     # Shell is never read-only-safe; block it explicitly so it stays out of plan
     # mode even if the schema list fails to load.
     "bash", "python",

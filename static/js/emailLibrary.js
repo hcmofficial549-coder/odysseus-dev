@@ -28,6 +28,10 @@ import { emailApiUrl } from './emailShared.js';
 import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
 
 const API_BASE = window.location.origin;
+const _EMAIL_DESKTOP_PAGE_LIMIT = 100;
+const _EMAIL_MOBILE_PAGE_LIMIT = 40;
+const _EMAIL_DESKTOP_READER_DOM_LIMIT = 6;
+const _EMAIL_READER_BUDGET_DELAY_MS = 450;
 let _emailUnreadChipClickWired = false;
 let _libLoadSeq = 0;
 let _libFolderSeq = 0;
@@ -37,6 +41,104 @@ let _libSearchInFlight = false;
 let _activeEmailReaderForSelectAll = null;
 let _libAccountsLoadedAt = 0;
 const _LIB_ACCOUNTS_TTL_MS = 5 * 60 * 1000;
+let _emailReaderDomSerial = 0;
+let _emailReaderBudgetTimer = null;
+let _emailReaderBudgetWatcherWired = false;
+
+function _isCompactEmailViewport() {
+  try {
+    return (window.matchMedia && window.matchMedia('(max-width: 768px)').matches) || window.innerWidth <= 768;
+  } catch (_) {
+    return window.innerWidth <= 768;
+  }
+}
+
+function _isOdysseusAndroidApp() {
+  const ua = navigator.userAgent || '';
+  return /\bOdysseusAndroid\b/i.test(ua) || !!window.OdysseusAndroid;
+}
+
+function _isDesktopEmailReaderBudgetEnabled() {
+  return !_isOdysseusAndroidApp() && window.innerWidth > 768;
+}
+
+function _isEmailReaderModalId(id) {
+  return !!id && (id.startsWith('email-reader-') || id.startsWith('email-window-'));
+}
+
+function _stampEmailReaderModal(modal) {
+  if (!modal) return;
+  _emailReaderDomSerial += 1;
+  modal.dataset.emailReaderOpenedAt = String(_emailReaderDomSerial);
+}
+
+function _isHiddenEmailReaderModal(modal, id) {
+  if (!modal) return false;
+  return modal.classList.contains('hidden')
+    || modal.classList.contains('modal-minimized')
+    || modal.style.display === 'none'
+    || (id && Modals.isRegistered(id) && Modals.isMinimized(id));
+}
+
+function _closeEmailReaderModalForBudget(id) {
+  if (!id) return;
+  try {
+    if (Modals.isRegistered(id)) {
+      Modals.close(id);
+      return;
+    }
+  } catch (_) {}
+  document.getElementById(id)?.remove();
+}
+
+function _enforceEmailReaderDomBudget(activeId = '') {
+  if (!_isDesktopEmailReaderBudgetEnabled()) return;
+  const readers = Array.from(document.querySelectorAll('.modal[id^="email-reader-"], .modal[id^="email-window-"]'))
+    .filter(modal => modal?.isConnected)
+    .map(modal => ({
+      id: modal.id,
+      hidden: _isHiddenEmailReaderModal(modal, modal.id),
+      openedAt: Number(modal.dataset.emailReaderOpenedAt || '0') || 0,
+    }))
+    .sort((a, b) => a.openedAt - b.openedAt);
+  if (readers.length <= _EMAIL_DESKTOP_READER_DOM_LIMIT) return;
+
+  let overflow = readers.length - _EMAIL_DESKTOP_READER_DOM_LIMIT;
+  for (const victim of readers) {
+    if (overflow <= 0) break;
+    if (victim.id === activeId || !victim.hidden) continue;
+    _closeEmailReaderModalForBudget(victim.id);
+    overflow -= 1;
+  }
+}
+
+function _scheduleEmailReaderDomBudget(activeId = '') {
+  if (!_isDesktopEmailReaderBudgetEnabled()) return;
+  if (_emailReaderBudgetTimer) clearTimeout(_emailReaderBudgetTimer);
+  _emailReaderBudgetTimer = setTimeout(() => {
+    _emailReaderBudgetTimer = null;
+    _enforceEmailReaderDomBudget(activeId);
+  }, _EMAIL_READER_BUDGET_DELAY_MS);
+}
+
+function _ensureEmailReaderDomBudgetWatcher() {
+  if (_emailReaderBudgetWatcherWired) return;
+  _emailReaderBudgetWatcherWired = true;
+  window.addEventListener('odysseus:modal-opened', (event) => {
+    const id = event?.detail?.id || '';
+    if (_isEmailReaderModalId(id)) _scheduleEmailReaderDomBudget(id);
+  });
+}
+
+function _clampEmailLimit(value, fallback) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return fallback;
+  return Math.max(1, Math.min(_EMAIL_DESKTOP_PAGE_LIMIT, Math.floor(n)));
+}
+
+function _emailPageLimit() {
+  return _isCompactEmailViewport() ? _EMAIL_MOBILE_PAGE_LIMIT : _EMAIL_DESKTOP_PAGE_LIMIT;
+}
 
 function _isEmailTypingTarget(t) {
   return !!(t && (
@@ -182,6 +284,38 @@ function _getActiveEmailContext() {
 try { window.__odysseusGetActiveEmailContext = _getActiveEmailContext; } catch (_) {}
 
 const _COPY_EMAIL_ICON = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
+const _EMAIL_FIT_ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 9V4h5"/><path d="M20 9V4h-5"/><path d="M4 15v5h5"/><path d="M20 15v5h-5"/><path d="M9 4 4 9"/><path d="m15 4 5 5"/><path d="m9 20-5-5"/><path d="m15 20 5-5"/></svg>';
+
+function _fitPageButtonHtml() {
+  return `<button class="memory-toolbar-btn reader-icon-btn email-reader-fit-btn" data-act="fit-page" type="button" title="Fit email to page" aria-label="Fit email to page" aria-pressed="false">${_EMAIL_FIT_ICON}<span class="reader-btn-label">Fit</span></button>`;
+}
+
+function _syncEmailReaderFitButton(reader) {
+  const btn = reader?.querySelector?.('[data-act="fit-page"]');
+  if (!btn) return;
+  const active = !!reader?.classList?.contains('email-reader-fit-page');
+  btn.classList.toggle('active', active);
+  btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+  btn.title = active ? 'Use original email width' : 'Fit email to page';
+  btn.setAttribute('aria-label', btn.title);
+}
+
+function _toggleEmailReaderFitPage(reader) {
+  if (!reader) return;
+  const active = reader.classList.toggle('email-reader-fit-page');
+  const body = reader.querySelector?.('.email-reader-body');
+  if (body && active) body.scrollLeft = 0;
+  _syncEmailReaderFitButton(reader);
+}
+
+function _wireEmailReaderFitPage(reader) {
+  if (!reader) return;
+  _syncEmailReaderFitButton(reader);
+  reader.querySelector?.('[data-act="fit-page"]')?.addEventListener('click', (ev) => {
+    ev.stopPropagation();
+    _toggleEmailReaderFitPage(reader);
+  });
+}
 
 function _decodeAttrValue(v) {
   const tmp = document.createElement('textarea');
@@ -489,7 +623,10 @@ function _toggleUnreadEmails() {
 function _syncUnreadTabBadge(count) {
   const label = count > 999 ? '999+ unread' : `${count} unread`;
   document.querySelectorAll('.minimized-dock-chip[data-modal-id="email-lib-modal"]').forEach(chip => {
-    if (count > 0) {
+    if (_isOdysseusAndroidApp()) {
+      delete chip.dataset.emailUnreadLabel;
+      chip.title = 'Restore Email';
+    } else if (count > 0) {
       chip.dataset.emailUnreadLabel = label;
       chip.title = `Open ${label}`;
     } else {
@@ -708,6 +845,7 @@ function _prepareEmailWindowForDocument(modal) {
 
 function _wireUnreadTabClick() {
   if (_emailUnreadChipClickWired) return;
+  if (_isOdysseusAndroidApp()) return;
   _emailUnreadChipClickWired = true;
   document.addEventListener('click', (e) => {
     const chip = e.target?.closest?.('.minimized-dock-chip[data-modal-id="email-lib-modal"][data-email-unread-label]');
@@ -983,50 +1121,38 @@ function _loadEmailsFresh() {
   return _loadEmails({ force: true, useCache: false });
 }
 
-function _isChatInteractionBusy() {
-  try {
-    if (window.__odysseusChatBusy) return true;
-    const until = Number(window.__odysseusChatBusyUntil || 0);
-    return until > Date.now();
-  } catch (_) {
-    return false;
+function _loadEmailsWhenChatIdle() {
+  const run = () => Promise.resolve(_loadEmails({ useCache: true })).catch(() => {});
+  if (typeof window !== 'undefined' && typeof window.requestIdleCallback === 'function') {
+    window.requestIdleCallback(run, { timeout: 900 });
+    return;
   }
+  setTimeout(run, 0);
 }
 
-function _loadEmailsWhenChatIdle({ delay = 700, retries = 180, options = {} } = {}) {
-  const run = () => {
-    if (!state._libOpen || !document.getElementById('email-lib-modal')) return;
-    if (_isChatInteractionBusy() && retries > 0) {
-      setTimeout(() => _loadEmailsWhenChatIdle({ delay: 1000, retries: retries - 1, options }), 1000);
-      return;
-    }
-    _loadEmails(options);
-  };
-  setTimeout(run, Math.max(0, Number(delay) || 0));
-}
-
-export function prewarmEmailLibrary({ delay = 2500 } = {}) {
+export function prewarmEmailLibrary({ delay = 2500, limit = null } = {}) {
   if (_libPrewarmTimer || _libPrewarmPromise) return;
   const elapsed = Date.now() - _libLastPrewarmAt;
-  if (elapsed >= 0 && elapsed < 5 * 60 * 1000) return;
+  if (elapsed >= 0 && elapsed < 60000) return;
+  const warmLimit = _clampEmailLimit(limit, _emailPageLimit());
   _libPrewarmTimer = setTimeout(() => {
     _libPrewarmTimer = null;
-    _libPrewarmPromise = _prewarmEmailViews()
+    _libPrewarmPromise = _prewarmDefaultEmailView({ limit: warmLimit })
       .catch(() => {})
       .finally(() => { _libPrewarmPromise = null; });
   }, Math.max(0, Number(delay) || 0));
 }
 
-function _sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-async function _prewarmEmailViews() {
+async function _prewarmDefaultEmailView({ limit = null } = {}) {
   if (state._libOpen) return;
   _libLastPrewarmAt = Date.now();
   _setEmailSyncStatus({ warming: true });
   const folder = 'INBOX';
   const filter = 'all';
+  const warmLimit = _clampEmailLimit(limit, _emailPageLimit());
+  const accountId = state._libAccountId || '';
+  const ck = _libCacheKeyFor(accountId, folder, filter, false);
+  if (_libCacheGet(ck)) return;
 
   // The accounts request is cheap and warms the account strip for first open.
   // Then folder/list requests warm both the client cache and the backend
@@ -1042,58 +1168,14 @@ async function _prewarmEmailViews() {
     }
   } catch (_) {}
 
-  const accounts = Array.isArray(state._libAccounts) ? state._libAccounts.filter(a => a && a.enabled !== false) : [];
-  const preferred = state._libAccountId
-    || (accounts.find(a => a.is_default)?.id)
-    || (accounts[0]?.id)
-    || '';
-  if (!state._libAccountId && preferred) {
-    state._libAccountId = preferred;
-    _publishActiveAccount();
-  }
-  const orderedAccountIds = [
-    preferred,
-    ...accounts.map(a => a.id).filter(id => id && id !== preferred),
-  ].filter((id, idx, arr) => arr.indexOf(id) === idx);
-  if (!orderedAccountIds.length) orderedAccountIds.push('');
-
-  try {
-    for (const accountId of orderedAccountIds.slice(0, 4)) {
-      if (state._libOpen) return;
-      const ck = _libCacheKeyFor(accountId, folder, filter, false);
-      if (_libCacheGet(ck)) continue;
-      await fetch(emailApiUrl('/api/email/folders', { account_id: accountId || undefined }), { credentials: 'same-origin' }).catch(() => null);
-      await fetch(emailApiUrl('/api/email/unread-state', { folder, account_id: accountId || undefined }), { credentials: 'same-origin' }).catch(() => null);
-      const res = await fetch(emailApiUrl('/api/email/list', {
-        folder,
-        limit: 100,
-        offset: 0,
-        filter,
-        account_id: accountId || undefined,
-      }), {
-        credentials: 'same-origin',
-      });
-      if (res.ok) {
-        const data = await res.json().catch(() => null);
-        if (data && !data.error) {
-          const sync = data.sync || {};
-          _libCachePut(ck, {
-            emails: data.emails || [],
-            total: data.total || 0,
-            sync,
-          });
-          _setEmailSyncStatus({
-            updatedAt: sync.updated_at || new Date().toISOString(),
-            source: sync.source || '',
-            warming: true,
-          });
-        }
-      }
-      await _sleep(900);
-    }
-  } finally {
-    _setEmailSyncStatus({ warming: false });
-  }
+  const accountQS = accountId ? `&account_id=${encodeURIComponent(accountId)}` : '';
+  const res = await fetch(`${API_BASE}/api/email/list?folder=${encodeURIComponent(folder)}${accountQS}&limit=${warmLimit}&offset=0&filter=${filter}`, {
+    credentials: 'same-origin',
+  });
+  if (!res.ok) return;
+  const data = await res.json().catch(() => null);
+  if (!data || data.error) return;
+  _libCachePut(ck, { emails: data.emails || [], total: data.total || 0 });
 }
 function _libCacheWriteBack() {
   // After a local mutation that already updated state._libEmails
@@ -1318,10 +1400,7 @@ export function openEmailLibrary(opts = {}) {
     Modals.register('email-lib-modal', {
       label: 'Email',
       icon: 'M2 4h20v16H2zM22 7l-9.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7',
-      closeFn: () => {
-        const m = document.getElementById('email-lib-modal');
-        if (m) m.classList.add('hidden');
-      },
+      closeFn: () => closeEmailLibrary(),
       restoreFn: () => {
         // Reopened last → bring the email windows in front of any open doc.
         document.body.classList.add('email-front');
@@ -1342,6 +1421,7 @@ export function openEmailLibrary(opts = {}) {
     });
   } catch (_) {}
   _wireUnreadTabClick();
+  _ensureEmailTabObserver();
   const unreadBadge = document.getElementById('email-lib-unread-badge');
   unreadBadge?.addEventListener('click', (e) => {
     e.stopPropagation();
@@ -1921,10 +2001,10 @@ function _renderAccountsStrip() {
 export function closeEmailLibrary() {
   const modal = document.getElementById('email-lib-modal');
   if (modal) modal.remove();
-  if (_libSyncTicker) {
-    clearInterval(_libSyncTicker);
-    _libSyncTicker = null;
-  }
+  try {
+    if (Modals.isRegistered('email-lib-modal')) Modals.unregister('email-lib-modal');
+  } catch (_) {}
+  _disconnectEmailGridTabObserver();
   _clearEmailDocumentSplit();
   if (state._libEscHandler) {
     document.removeEventListener('keydown', state._libEscHandler, true);
@@ -3243,6 +3323,7 @@ async function _loadEmails({ force = false, useCache = true } = {}) {
   const offsetAtStart = state._libOffset;
   const searchAtStart = state._libSearch;
   const hasAttachmentsAtStart = state._libHasAttachments;
+  const pageLimit = _emailPageLimit();
 
   const grid = document.getElementById('email-lib-grid');
   if (!grid) { if (seq === _libLoadSeq) state._libLoading = false; return; }
@@ -3298,7 +3379,7 @@ async function _loadEmails({ force = false, useCache = true } = {}) {
       // opens omit it so rapid close/reopen returns instantly; the
       // Refresh button passes `force: true` to add it back.
       const buster = force ? `&_=${Date.now()}` : '';
-      const res = await fetch(`${API_BASE}/api/email/list?folder=${encodeURIComponent(folderAtStart)}${accountQS}&limit=100&offset=${offsetAtStart}&filter=${filterAtStart}${attQS}${buster}`);
+      const res = await fetch(`${API_BASE}/api/email/list?folder=${encodeURIComponent(folderAtStart)}${accountQS}&limit=${pageLimit}&offset=${offsetAtStart}&filter=${filterAtStart}${attQS}${buster}`);
       const data = await res.json();
       if (seq !== _libLoadSeq || accountAtStart !== (state._libAccountId || '')) return;
       if (data.error) throw new Error(data.error);
@@ -4033,6 +4114,8 @@ async function _toggleCardPreview(card, em) {
             ${_hasMultipleRecipients(data) ? `<button class="memory-toolbar-btn reader-icon-btn" data-act="reply-all" title="Reply All"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="7 17 2 12 7 7"/><polyline points="12 17 7 12 12 7"/><path d="M22 18v-2a4 4 0 0 0-4-4H7"/></svg><span class="reader-btn-label">Reply all</span></button>` : ''}
             <button class="memory-toolbar-btn reader-icon-btn" data-act="forward" title="Forward"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 17 20 12 15 7"/><path d="M4 18v-2a4 4 0 0 1 4-4h12"/></svg><span class="reader-btn-label">Forward</span></button>
             <button class="memory-toolbar-btn reader-icon-btn" data-act="summarize" title="Summarize">${_summaryIcon(data)}<span class="reader-btn-label">Summary</span></button>
+            ${_fitPageButtonHtml()}
+            <button class="memory-toolbar-btn reader-icon-btn" data-act="from-sender" title="Search text in this thread"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg><span class="reader-btn-label">Search</span></button>
             <div class="email-reader-more-wrap" style="position:relative">
               <button class="memory-toolbar-btn reader-icon-btn" data-act="more" title="More actions"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg><span class="reader-btn-label">More</span></button>
             </div>
@@ -4046,10 +4129,33 @@ async function _toggleCardPreview(card, em) {
     reader.classList.remove('email-card-reader-loading');
     reader.style.minHeight = '';
 
-    _wireEmailAttachmentWrap(reader, folderAtStart);
-    _wireEmailInlineImages(reader);
-    _loadDeferredAttachmentsIntoReader(reader, em.uid, folderAtStart, data, !!em.has_attachments);
-    _maybeAutoTranslateEmail(reader);
+    // Attachment header click toggles fold/unfold (same UX as the summary).
+    const attsWrap = reader.querySelector('.email-reader-atts-wrap');
+    if (attsWrap) {
+      const attsToggle = attsWrap.querySelector('.email-reader-atts-header');
+      if (attsToggle) {
+        attsToggle.addEventListener('click', (ev) => {
+          ev.stopPropagation();
+          attsWrap.classList.toggle('collapsed');
+        });
+        attsToggle.addEventListener('keydown', (ev) => {
+          if (ev.key === 'Enter' || ev.key === ' ') {
+            ev.preventDefault();
+            attsWrap.classList.toggle('collapsed');
+          }
+        });
+      }
+    }
+
+    // Attachment chip clicks: works on both mobile (iOS Safari ignores
+    // programmatic <a download> outside an actual <a> in the DOM) and desktop.
+    // On mobile we open the URL in a new tab so the OS picks the action; on
+    // desktop we fetch + blob-download so the filename is preserved and no
+    // popup-blocker fires.
+    const _isMobileUA = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+
+    _wireAttachmentHandlers(reader, state._libFolder);
+    _wireEmailReaderFitPage(reader);
 
     reader.querySelector('[data-act="reply"]')?.addEventListener('click', async (ev) => {
       ev.stopPropagation();
@@ -5885,39 +5991,66 @@ function _syncEmailTabBadge() {
 }
 let _emailTabObserverWired = false;
 let _badgeSyncScheduled = false;
+let _emailTabDockObserver = null;
+let _emailTabGridObserver = null;
+let _emailTabObservedGrid = null;
+let _emailTabGridRetryTimer = null;
+
+function _scheduleEmailTabBadgeSync() {
+  if (_badgeSyncScheduled) return;
+  _badgeSyncScheduled = true;
+  requestAnimationFrame(() => {
+    _badgeSyncScheduled = false;
+    _syncEmailTabBadge();
+  });
+}
+
+function _disconnectEmailGridTabObserver() {
+  if (_emailTabGridRetryTimer) {
+    clearTimeout(_emailTabGridRetryTimer);
+    _emailTabGridRetryTimer = null;
+  }
+  if (_emailTabGridObserver) {
+    try { _emailTabGridObserver.disconnect(); } catch (_) {}
+    _emailTabGridObserver = null;
+  }
+  _emailTabObservedGrid = null;
+}
+
+function _wireEmailGridTabObserver() {
+  const grid = document.getElementById('email-lib-grid');
+  if (!grid) {
+    _disconnectEmailGridTabObserver();
+    if (document.getElementById('email-lib-modal')) {
+      _emailTabGridRetryTimer = setTimeout(_wireEmailGridTabObserver, 500);
+    }
+    return;
+  }
+  if (_emailTabObservedGrid === grid && _emailTabGridObserver) return;
+  _disconnectEmailGridTabObserver();
+  _emailTabObservedGrid = grid;
+  _emailTabGridObserver = new MutationObserver(_scheduleEmailTabBadgeSync);
+  _emailTabGridObserver.observe(grid, { subtree: true, attributes: true, attributeFilter: ['class'] });
+}
+
 function _ensureEmailTabObserver() {
-  if (_emailTabObserverWired) return;
-  _emailTabObserverWired = true;
-  // Debounce so a burst of mutations (e.g. _renderDock rebuilding the
-  // whole dock in one pass) collapses to a single sync per animation
-  // frame. Without this the chip badge could flicker as the observer
-  // fires repeatedly during dock rerenders.
-  const handler = () => {
-    if (_badgeSyncScheduled) return;
-    _badgeSyncScheduled = true;
-    requestAnimationFrame(() => {
-      _badgeSyncScheduled = false;
-      _syncEmailTabBadge();
-    });
-  };
-  const tryWire = () => {
-    const dock = document.getElementById('minimized-dock');
-    if (!dock) { setTimeout(tryWire, 200); return; }
-    // Only watch what we care about: chip add/remove in the dock.
-    const obs = new MutationObserver(handler);
-    obs.observe(dock, { childList: true });
-    // Watch the library grid so toggling a card expanded/collapsed
-    // updates the lib chip's "has-expanded" badge in real time.
-    const wireGridObs = () => {
-      const grid = document.getElementById('email-lib-grid');
-      if (!grid) { setTimeout(wireGridObs, 500); return; }
-      const gridObs = new MutationObserver(handler);
-      gridObs.observe(grid, { subtree: true, attributes: true, attributeFilter: ['class'] });
+  if (!_emailTabObserverWired) {
+    _emailTabObserverWired = true;
+    const tryWireDock = () => {
+      const dock = document.getElementById('minimized-dock');
+      if (!dock) { setTimeout(tryWireDock, 200); return; }
+      if (!_emailTabDockObserver) {
+        _emailTabDockObserver = new MutationObserver(_scheduleEmailTabBadgeSync);
+        _emailTabDockObserver.observe(dock, { childList: true });
+      }
+      _scheduleEmailTabBadgeSync();
     };
-    wireGridObs();
-    handler();
-  };
-  tryWire();
+    tryWireDock();
+  }
+  // The email library grid is destroyed/recreated when the modal closes.
+  // Rewire this observer to the current grid instead of retaining old DOM.
+  _wireEmailGridTabObserver();
+  _scheduleEmailTabBadgeSync();
 }
 // Hybrid model:
 //   - email-lib-modal (the inbox library) is unique. Its chip just
@@ -5956,6 +6089,8 @@ async function _openEmailAsTab(em, folder) {
     </div>
   `;
   document.body.appendChild(modal);
+  _stampEmailReaderModal(modal);
+  _ensureEmailReaderDomBudgetWatcher();
   // Inherit display from .modal (flex-center). z-index above the library
   // (which uses default .modal z-index 250) so the new tab sits on top.
   modal.style.zIndex = '270';
@@ -6030,7 +6165,7 @@ async function _openEmailAsTab(em, folder) {
       document.removeEventListener('mouseup', stopDrag);
     };
     mh.addEventListener('mousedown', (e) => {
-      if (e.target.closest('.close-btn, .minimize-btn, .modal-minimize-btn')) return;
+      if (e.target.closest('.close-btn, .minimize-btn, .modal-minimize-btn, .modal-expand-btn')) return;
       e.preventDefault();
       startDrag(e.clientX, e.clientY);
       document.addEventListener('mousemove', onDrag);
@@ -6063,6 +6198,7 @@ async function _openEmailAsTab(em, folder) {
   }
   _ensureEmailTabObserver();
   _syncEmailTabBadge();
+  _scheduleEmailReaderDomBudget(modalId);
 
   // Fetch + render the email body using the exact same template as
   // _toggleCardPreview so the visuals match perfectly.
@@ -6110,6 +6246,7 @@ async function _openEmailAsTab(em, folder) {
             ${_hasMultipleRecipients(data) ? `<button class="memory-toolbar-btn reader-icon-btn" data-act="reply-all" title="Reply All"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="7 17 2 12 7 7"/><polyline points="12 17 7 12 12 7"/><path d="M22 18v-2a4 4 0 0 0-4-4H7"/></svg><span class="reader-btn-label">Reply all</span></button>` : ''}
             <button class="memory-toolbar-btn reader-icon-btn" data-act="forward" title="Forward"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 17 20 12 15 7"/><path d="M4 18v-2a4 4 0 0 1 4-4h12"/></svg><span class="reader-btn-label">Forward</span></button>
             <button class="memory-toolbar-btn reader-icon-btn" data-act="summarize" title="Summarize">${_summaryIcon(data)}<span class="reader-btn-label">Summary</span></button>
+            ${_fitPageButtonHtml()}
             <button class="memory-toolbar-btn reader-icon-btn" data-act="from-sender" title="Search text in this thread"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg><span class="reader-btn-label">Search</span></button>
             <div class="email-reader-more-wrap" style="position:relative">
               <button class="memory-toolbar-btn reader-icon-btn" data-act="more" title="More actions"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg><span class="reader-btn-label">More</span></button>
@@ -6123,10 +6260,13 @@ async function _openEmailAsTab(em, folder) {
     _markEmailReaderActive(reader);
     reader.classList.remove('email-card-reader-loading');
     _wireRecipientChips(reader);
-    _wireEmailAttachmentWrap(reader, useFolder);
-    _wireEmailInlineImages(reader);
-    _loadDeferredAttachmentsIntoReader(reader, em.uid, useFolder, data, !!em.has_attachments);
-    _maybeAutoTranslateEmail(reader);
+    try { _wireAttachmentHandlers(reader, useFolder); } catch {}
+    _wireEmailReaderFitPage(reader);
+    const attsWrap = reader.querySelector('.email-reader-atts-wrap');
+    if (attsWrap) {
+      const attsToggle = attsWrap.querySelector('.email-reader-atts-header');
+      if (attsToggle) attsToggle.addEventListener('click', (ev) => { ev.stopPropagation(); attsWrap.classList.toggle('collapsed'); });
+    }
     reader.querySelector('[data-act="reply"]')?.addEventListener('click', async (ev) => {
       ev.stopPropagation();
       _snapEmailModalToLeftSidebar(ev.currentTarget.closest('.modal'));
@@ -6191,7 +6331,24 @@ async function _openEmailWindow(em, folder) {
     </div>
   `;
   document.body.appendChild(modal);
+  _stampEmailReaderModal(modal);
+  _ensureEmailReaderDomBudgetWatcher();
   modal.style.display = 'block';
+  let windowClosed = false;
+  const closeWindow = () => {
+    if (windowClosed) return;
+    windowClosed = true;
+    modal.remove();
+  };
+  Modals.register(winId, {
+    label: 'Email',
+    icon: _EMAIL_ICON_PATH,
+    closeFn: closeWindow,
+    restoreFn: () => {
+      document.body.classList.add('email-front');
+    },
+  });
+  try { Modals.injectMinimizeButton(modal, winId); } catch {}
   const content = modal.querySelector('.modal-content');
   // Position offset from screen center so successive windows cascade.
   const isMobile = window.innerWidth <= 768;
@@ -6212,8 +6369,12 @@ async function _openEmailWindow(em, folder) {
       content.style.top  = Math.max(20, (window.innerHeight - h) / 3 + off) + 'px';
     });
   }
-  modal.querySelector('.close-btn')?.addEventListener('click', () => modal.remove());
+  modal.querySelector('.close-btn')?.addEventListener('click', (ev) => {
+    ev.stopPropagation();
+    Modals.close(winId);
+  });
   try { _makeDraggable(content, modal, 'email-window-fullscreen'); } catch {}
+  _scheduleEmailReaderDomBudget(winId);
 
   // Load + render
   const bodyEl = modal.querySelector('.email-window-body');
@@ -6271,6 +6432,8 @@ async function _openEmailWindow(em, folder) {
             ${_hasMultipleRecipients(data) ? `<button class="memory-toolbar-btn reader-icon-btn" data-act="reply-all" title="Reply All"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="7 17 2 12 7 7"/><polyline points="12 17 7 12 12 7"/><path d="M22 18v-2a4 4 0 0 0-4-4H7"/></svg><span class="reader-btn-label">Reply all</span></button>` : ''}
             <button class="memory-toolbar-btn reader-icon-btn" data-act="forward" title="Forward"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 17 20 12 15 7"/><path d="M4 18v-2a4 4 0 0 1 4-4h12"/></svg><span class="reader-btn-label">Forward</span></button>
             <button class="memory-toolbar-btn reader-icon-btn" data-act="summarize" title="Summarize">${_summaryIcon(data)}<span class="reader-btn-label">Summary</span></button>
+            ${_fitPageButtonHtml()}
+            <button class="memory-toolbar-btn reader-icon-btn" data-act="from-sender" title="Search text in this thread"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg><span class="reader-btn-label">Search</span></button>
             <div class="email-reader-more-wrap" style="position:relative">
               <button class="memory-toolbar-btn reader-icon-btn" data-act="more" title="More actions"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg><span class="reader-btn-label">More</span></button>
             </div>
@@ -6283,10 +6446,13 @@ async function _openEmailWindow(em, folder) {
     _markEmailReaderActive(bodyEl);
     _wireRecipientChips(bodyEl);
     // Wire all the same action handlers the inline reader has.
-    _wireEmailAttachmentWrap(bodyEl, useFolder);
-    _wireEmailInlineImages(bodyEl);
-    _loadDeferredAttachmentsIntoReader(bodyEl, em.uid, useFolder, data, !!em.has_attachments);
-    _maybeAutoTranslateEmail(bodyEl);
+    try { _wireAttachmentHandlers(bodyEl, useFolder); } catch {}
+    _wireEmailReaderFitPage(bodyEl);
+    const attsWrap = bodyEl.querySelector('.email-reader-atts-wrap');
+    if (attsWrap) {
+      const attsToggle = attsWrap.querySelector('.email-reader-atts-header');
+      if (attsToggle) attsToggle.addEventListener('click', (ev) => { ev.stopPropagation(); attsWrap.classList.toggle('collapsed'); });
+    }
     bodyEl.querySelector('[data-act="reply"]')?.addEventListener('click', async (ev) => {
       ev.stopPropagation();
       _snapEmailModalToLeftSidebar(ev.currentTarget.closest('.modal'));
@@ -6411,13 +6577,15 @@ async function _summarizeEmail(reader, data, btn) {
       existing.style.display = '';
       if (btn) {
         btn.classList.add('active');
-        btn.querySelector('.btn-label').textContent = 'Summary';
+        const label = btn.querySelector('.reader-btn-label, .btn-label');
+        if (label) label.textContent = 'Summary';
       }
     } else {
       existing.style.display = 'none';
       if (btn) {
         btn.classList.remove('active');
-        btn.querySelector('.btn-label').textContent = 'Summary';
+        const label = btn.querySelector('.reader-btn-label, .btn-label');
+        if (label) label.textContent = 'Summary';
       }
     }
     return;
@@ -6438,7 +6606,7 @@ async function _summarizeEmail(reader, data, btn) {
     body.insertBefore(prompt, body.firstChild);
     if (btn) {
       btn.classList.add('active');
-      const label = btn.querySelector('.btn-label');
+      const label = btn.querySelector('.reader-btn-label, .btn-label');
       if (label) label.textContent = 'Summary';
     }
     // No Cancel button — toggling the Summary button again hides this panel
@@ -6492,7 +6660,8 @@ async function _generateSummary(reader, data, btn) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        body: data.body,
+        body: data.body || '',
+        body_html: data.body_html || '',
         subject: data.subject,
         from: `${data.from_name} <${data.from_address}>`,
         // Send identifiers so the backend can fetch the raw message and
@@ -6508,18 +6677,18 @@ async function _generateSummary(reader, data, btn) {
     content.innerHTML = '';
     if (result.success && result.summary) {
       content.textContent = result.summary;
+      data.cached_summary = result.summary;
       if (btn) {
         btn.classList.add('active');
-        const label = btn.querySelector('.btn-label');
+        const label = btn.querySelector('.reader-btn-label, .btn-label');
         if (label) label.textContent = 'Summary';
       }
     } else {
       content.innerHTML = `<span style="color:var(--red)">${_esc(result.error || 'Failed to summarize')}</span>`;
-      panel.remove();
     }
   } catch (e) {
     sp.destroy();
-    panel.remove();
+    content.innerHTML = `<span style="color:var(--red)">${_esc(e?.message || 'Failed to summarize')}</span>`;
     if (uiModule) uiModule.showError?.('Failed to summarize');
   } finally {
     if (btn) btn.disabled = false;

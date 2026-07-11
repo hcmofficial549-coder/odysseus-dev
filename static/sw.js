@@ -7,7 +7,7 @@
 //   - Other static assets (images/fonts/libs): cache-first with bg refresh.
 //   - API / non-GET: never cached.
 // Bump CACHE_NAME whenever the precache list or SW logic changes.
-const CACHE_NAME = 'odysseus-v344';
+const CACHE_NAME = 'odysseus-v429';
 
 // Core shell precached on install so repeat opens are instant without any
 // network wait. Keep this list in sync with the <script type="module"> tags
@@ -15,9 +15,21 @@ const CACHE_NAME = 'odysseus-v344';
 const PRECACHE = [
   '/',
   '/static/style.css',
+  '/static/css/_core.css',
+  '/static/css/_layout.css',
+  '/static/css/_interactions.css',
+  '/static/css/_syntax.css',
+  '/static/css/_chat.css',
+  '/static/css/_editor.css',
+  '/static/css/_email.css',
+  '/static/css/_notes.css',
+  '/static/css/_calendar.css',
+  '/static/css/_extras.css',
   '/static/app.js',
+  '/static/js/effects/cursorTrail.js',
   '/static/js/storage.js',
   '/static/js/ui.js',
+  '/static/js/modalManager.js',
   '/static/js/markdown.js',
   '/static/js/dragSort.js',
   '/static/js/sessions.js',
@@ -44,9 +56,11 @@ const PRECACHE = [
   '/static/js/theme.js',
   '/static/js/censor.js',
   '/static/js/settings.js',
-  '/static/js/admin.js',
+  '/static/js/admin.js?v=20260615unload',
   '/static/js/init.js',
   '/static/js/slashCommands.js',
+  '/static/js/workspace.js',
+  '/static/js/workspaceEditor.js',
   '/static/js/emailInbox.js',
   '/static/js/emailLibrary/utils.js',
   '/static/js/emailLibrary/signatureFold.js',
@@ -58,6 +72,7 @@ const PRECACHE = [
   '/static/js/calendar/reminders.js',
   '/static/js/group.js',
   '/static/js/keyboard-shortcuts.js',
+  '/static/js/keybindMatcher.js',
   '/static/js/sidebar-layout.js',
   '/static/js/section-management.js',
   '/static/lib/highlight.min.js',
@@ -112,9 +127,9 @@ self.addEventListener('fetch', (e) => {
     return;
   }
 
-  // JS/CSS: network-first — always try the network so code/style edits show up
-  // on a normal reload; fall back to cache only when offline.
-  if (url.pathname.startsWith('/static/') && /\.(js|css)(\?|$)/.test(url.pathname + url.search)) {
+  // HTML/JS/CSS: network-first — always try the network so app-shell/code/style
+  // edits show up on a normal reload; fall back to cache only when offline.
+  if (url.pathname.startsWith('/static/') && /\.(html|js|css)(\?|$)/.test(url.pathname + url.search)) {
     e.respondWith(
       fetch(e.request).then(res => {
         if (res && res.ok) {

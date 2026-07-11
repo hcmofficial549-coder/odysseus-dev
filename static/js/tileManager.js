@@ -4,14 +4,18 @@
  * Hooks into any modal whose `.modal-header` is dragged (each tool wires its
  * own drag; we just watch pointer moves). Shows a translucent ghost preview
  * when the cursor is near a snap zone. On release, snaps the modal-content
- * to fill that zone with a springy animation.
+ * to fill that zone with a springy animation. Right-edge snapping delegates
+ * to modalSnap's edge dock so the chat/composer reserve space and reflow
+ * instead of being covered by a fixed overlay tile.
  *
  * Snap zones:
  *   - over top edge               → fullscreen
  *   - top strip                   → maximize
  *   - top edge                    → top half
  *   - left edge                   → left half
- *   - right edge                  → right half
+ *   - right edge                  → reserved right dock
+ *   - bottom-left corner          → bottom-left quarter
+ *   - bottom-right corner         → bottom-right quarter
  *   - bottom edge                 → bottom half
  *
  * Mobile (≤768px) is excluded — the swipe-dismiss UX takes precedence.
@@ -20,17 +24,100 @@
  * the original size.
  */
 
+import { applyEdgeDock, clearRightDock, edgeDockPreviewRect } from './modalSnap.js';
+
 const EDGE_THRESHOLD_PX = 24;     // how close to an edge counts as "near"
 const TOP_FULL_STRIP_PX = 8;      // top strip → maximize
+const MIN_CHAT_WIDTH = 380;
+const MIN_EDGE_DOCK_WIDTH = 360;
+const MAX_DESKTOP_EDGE_DOCK_WIDTH = 720;
+const MAX_DESKTOP_EDGE_DOCK_RATIO = 0.44;
+const DOCK_SIDES = ['left', 'right', 'top', 'bottom'];
+const DOCK_ZONE_TO_SIDE = {
+  'left-half': 'left',
+  'right-half': 'right',
+  'top-half': 'top',
+  'bottom-half': 'bottom',
+};
+const SETTINGS_DOCK_ZONES = new Set(['right-half', 'top-half', 'bottom-half']);
 
 let _ghost = null;
 let _activeZone = null;
 let _tracking = null; // { content, startRect }
 
-function _isDesktop() { return window.innerWidth > 768; }
+function _hasFinePointer() {
+  if (typeof window.matchMedia !== 'function') return true;
+  return window.matchMedia('(pointer: fine)').matches;
+}
+
+function _isTouchInput() {
+  if (typeof window.matchMedia !== 'function') {
+    return typeof navigator !== 'undefined' && navigator.maxTouchPoints > 0;
+  }
+  return window.matchMedia('(pointer: coarse)').matches
+    || window.matchMedia('(hover: none)').matches
+    || navigator.maxTouchPoints > 0;
+}
+
+function _isTouchLandscape() {
+  if (typeof window.matchMedia !== 'function') return false;
+  return window.matchMedia('(orientation: landscape)').matches && _isTouchInput();
+}
+
+function _isTouchPortrait() {
+  if (typeof window.matchMedia !== 'function') return false;
+  return window.matchMedia('(orientation: portrait)').matches && _isTouchInput();
+}
+
+function _isElementVisible(el) {
+  if (!el) return false;
+  const cs = window.getComputedStyle(el);
+  if (cs.display === 'none' || cs.visibility === 'hidden') return false;
+  const opacity = parseFloat(cs.opacity || '1');
+  return !Number.isFinite(opacity) || opacity > 0.05;
+}
+
+function _isDesktop() {
+  // This is desktop tiling. Coarse-touch Android landscape uses edge docking
+  // only; otherwise the same swipe can also leave a right-half tile snap behind.
+  return window.innerWidth > 768 && _hasFinePointer();
+}
 
 function _dockClassForSide(side) {
-  return side === 'left' ? 'modal-left-docked' : 'modal-right-docked';
+  return `modal-${side}-docked`;
+}
+
+function _uiScaleFactor() {
+  try {
+    const raw = window.getComputedStyle?.(document.documentElement)
+      ?.getPropertyValue?.('--ui-scale-factor') || '';
+    const scale = parseFloat(raw);
+    return Number.isFinite(scale) && scale > 0 ? scale : 1;
+  } catch (_) {
+    return 1;
+  }
+}
+
+// Pointer hit-testing stays in visual viewport pixels. Fixed-position styles
+// live under root-level CSS `zoom`, so authored rectangles must be converted
+// to the corresponding unzoomed layout coordinate space first.
+export function fixedLayoutRect(rect) {
+  if (!rect) return null;
+  const scale = _uiScaleFactor();
+  const left = (Number(rect.left) || 0) / scale;
+  const top = (Number(rect.top) || 0) / scale;
+  const width = Math.max(0, Number(rect.width) || 0) / scale;
+  const height = Math.max(0, Number(rect.height) || 0) / scale;
+  return { left, top, right: left + width, bottom: top + height, width, height };
+}
+
+export function viewportLayoutRect() {
+  return fixedLayoutRect({
+    left: 0,
+    top: 0,
+    width: window.innerWidth || document.documentElement.clientWidth || 0,
+    height: window.innerHeight || document.documentElement.clientHeight || 0,
+  });
 }
 
 function _hasOtherDockedWindow(side, owner) {
@@ -44,13 +131,31 @@ function _hasOtherDockedWindow(side, owner) {
 }
 
 function _clearDockSide(side, owner = null) {
-  if (side !== 'left' && side !== 'right') return;
+  if (!DOCK_SIDES.includes(side)) return;
   if (_hasOtherDockedWindow(side, owner)) return;
-  document.body.classList.remove(side === 'left' ? 'left-dock-active' : 'right-dock-active');
-  document.documentElement.style.removeProperty(side === 'left' ? '--left-dock-w' : '--right-dock-w');
+  const horizontal = side === 'left' || side === 'right';
+  document.body.classList.remove(`${side}-dock-active`);
+  document.documentElement.style.removeProperty(`--${side}-dock-${horizontal ? 'w' : 'h'}`);
+  document.documentElement.style.removeProperty(`--${side}-dock-reserve-${horizontal ? 'w' : 'h'}`);
   if (side === 'left') {
     try { window._restoreSidebarIfRouteCollapsed?.(); } catch (_) {}
   }
+}
+
+function _clearEmailSplitGeometry() {
+  document.body.classList.remove('email-doc-split-active', 'email-front');
+  document.documentElement.style.removeProperty('--email-doc-split-left-x');
+  document.documentElement.style.removeProperty('--email-doc-split-email-w');
+  document.documentElement.style.removeProperty('--email-doc-split-right-x');
+  const docPane = document.getElementById('doc-editor-pane');
+  if (docPane) {
+    [
+      'position', 'left', 'right', 'top', 'bottom', 'width', 'max-width',
+      'height', 'z-index', 'transform',
+    ].forEach((prop) => docPane.style.removeProperty(prop));
+  }
+  const divider = document.getElementById('doc-divider');
+  if (divider) divider.style.display = '';
 }
 
 function _ensureGhost() {
@@ -74,79 +179,183 @@ function _showGhost(rect) {
   g.classList.add('visible');
 }
 
-function _viewportSafeRect() {
-  // Account for the icon rail / sidebar on the left side of the viewport.
+function _viewportWorkspaceRect(inset = 4) {
+  // Account for visible nav rails on either side of the viewport. Android
+  // landscape chooses the rail side dynamically based on the camera cutout,
+  // so read the actual side instead of assuming a fixed edge.
   const sidebar = document.getElementById('sidebar');
   const rail = document.querySelector('.icon-rail') || document.querySelector('#icon-rail');
   let leftEdge = 0;
-  const sb = sidebar?.getBoundingClientRect();
-  if (sb && sb.right > 0 && !sidebar.classList.contains('hidden')) leftEdge = Math.max(leftEdge, sb.right);
-  const rr = rail?.getBoundingClientRect();
-  if (rr && rr.right > 0) leftEdge = Math.max(leftEdge, rr.right);
+  let rightEdge = window.innerWidth;
+  const prefersRightNav = document.body.classList.contains('hamburger-right');
+  const isRightNav = (el, span) => !!(el?.classList?.contains('right-side')
+    || prefersRightNav
+    || span?.right >= window.innerWidth - 1
+    || span?.left >= window.innerWidth / 2);
+  const visibleSpan = (el) => {
+    if (!el || !_isElementVisible(el)) return null;
+    const r = el.getBoundingClientRect();
+    if (!r || r.width <= 1 || r.height <= 1) return null;
+    const left = Math.max(0, r.left);
+    const right = Math.min(window.innerWidth, r.right);
+    if (right - left <= 1) return null;
+    return { rect: r, left, right };
+  };
+  const sbSpan = !sidebar?.classList?.contains('hidden') ? visibleSpan(sidebar) : null;
+  if (sbSpan) {
+    const sb = sbSpan.rect;
+    if (isRightNav(sidebar, sbSpan)) {
+      if (sbSpan.left <= 1 && sbSpan.right < window.innerWidth / 2) {
+        // Right-side nav can briefly report its old left-edge rect while the
+        // Android dock/sidebar transition is settling. Ignore that stale span
+        // so fullscreen content is not offset by a phantom left menu.
+      } else {
+        rightEdge = Math.min(rightEdge, sbSpan.left);
+      }
+    } else if (sbSpan.left <= 1 || sb.left <= 1) {
+      leftEdge = Math.max(leftEdge, sbSpan.right);
+    }
+  }
+  const railSpan = visibleSpan(rail);
+  if (railSpan) {
+    const rr = railSpan.rect;
+    if (isRightNav(rail, railSpan)) {
+      if (railSpan.left <= 1 && railSpan.right < window.innerWidth / 2) {
+        // Same transitional guard as the sidebar above.
+      } else {
+        rightEdge = Math.min(rightEdge, railSpan.left);
+      }
+    } else if (railSpan.left <= 1 || rr.left <= 1) {
+      leftEdge = Math.max(leftEdge, railSpan.right);
+    }
+  }
   return {
-    left: leftEdge + 4,
-    top: 4,
-    right: window.innerWidth - 4,
-    bottom: window.innerHeight - 4,
+    left: leftEdge + inset,
+    top: inset,
+    right: rightEdge - inset,
+    bottom: window.innerHeight - inset,
   };
 }
 
+function _viewportSafeRect() {
+  const visual = _viewportWorkspaceRect(4);
+  return fixedLayoutRect({
+    left: visual.left,
+    top: visual.top,
+    width: Math.max(0, visual.right - visual.left),
+    height: Math.max(0, visual.bottom - visual.top),
+  });
+}
+
+function _rightDockPreviewRect(safe) {
+  const W = Math.max(0, safe.right - safe.left);
+  const H = Math.max(0, safe.bottom - safe.top);
+  const maxByChat = Math.max(MIN_EDGE_DOCK_WIDTH, W - MIN_CHAT_WIDTH);
+  const dockW = Math.min(
+    W,
+    Math.max(
+      MIN_EDGE_DOCK_WIDTH,
+      Math.min(
+        MAX_DESKTOP_EDGE_DOCK_WIDTH,
+        Math.round(W * MAX_DESKTOP_EDGE_DOCK_RATIO),
+        maxByChat,
+      ),
+    ),
+  );
+  return { left: safe.right - dockW, top: safe.top, width: dockW, height: H };
+}
+
+function _fullscreenRect() {
+  if (_isTouchLandscape()) {
+    const visual = _viewportWorkspaceRect(0);
+    return fixedLayoutRect({
+      left: visual.left,
+      top: visual.top,
+      width: Math.max(0, visual.right - visual.left),
+      height: Math.max(0, visual.bottom - visual.top),
+    });
+  }
+  return viewportLayoutRect();
+}
+
+export function fullscreenWorkspaceRect() {
+  return _fullscreenRect();
+}
+
 function _zoneForPointer(x, y) {
-  const safe = _viewportSafeRect();
+  const safeVisual = _viewportWorkspaceRect(4);
+  const safe = fixedLayoutRect({
+    left: safeVisual.left,
+    top: safeVisual.top,
+    width: Math.max(0, safeVisual.right - safeVisual.left),
+    height: Math.max(0, safeVisual.bottom - safeVisual.top),
+  });
   const W = safe.right - safe.left;
   const H = safe.bottom - safe.top;
 
-  // Dragged OVER the top edge (cursor at/past the very top) → TRUE fullscreen
-  // that covers everything, including the sidebar.
+  // Dragged OVER the top edge (cursor at/past the very top) -> desktop fullscreen.
   if (y <= 0) {
-    return { name: 'fullscreen', rect: { left: 0, top: 0, width: window.innerWidth, height: window.innerHeight } };
+    return { name: 'fullscreen', rect: _fullscreenRect() };
   }
   // Near the top edge (but not over it) → "maximize": fill the safe area,
   // which sits NEXT TO the sidebar/rail rather than covering it.
-  if (y <= safe.top + TOP_FULL_STRIP_PX) {
+  if (y <= safeVisual.top + TOP_FULL_STRIP_PX) {
     return { name: 'maximize', rect: { left: safe.left, top: safe.top, width: W, height: H } };
   }
 
-  // Symmetric edge half-snaps. The safe rect already starts to the right of
-  // the sidebar/rail, so left-half fills the left side of the workspace
-  // without covering navigation.
-  if (y <= safe.top + EDGE_THRESHOLD_PX)
+  // Edge half-snaps use the safe workspace, so navigation remains visible.
+  if (y <= safeVisual.top + EDGE_THRESHOLD_PX)
     return { name: 'top-half', rect: { left: safe.left, top: safe.top, width: W, height: H / 2 } };
-  if (x <= safe.left + EDGE_THRESHOLD_PX)
+  if (x <= safeVisual.left + EDGE_THRESHOLD_PX)
     return { name: 'left-half', rect: { left: safe.left, top: safe.top, width: W / 2, height: H } };
-  if (x >= safe.right - EDGE_THRESHOLD_PX)
-    return { name: 'right-half', rect: { left: safe.left + W / 2, top: safe.top, width: W / 2, height: H } };
-  if (y >= safe.bottom - EDGE_THRESHOLD_PX)
+  if (x >= safeVisual.right - EDGE_THRESHOLD_PX)
+    return { name: 'right-half', rect: _rightDockPreviewRect(safe) };
+  if (y >= safeVisual.bottom - EDGE_THRESHOLD_PX)
     return { name: 'bottom-half', rect: { left: safe.left, top: safe.top + H / 2, width: W, height: H / 2 } };
 
   return null;
 }
 
-function _zoneForContent(content, x, y) {
+function _zoneForContent(content, x, y, deferSharedDock = true) {
   const modal = content && content.closest && content.closest('.modal, .research-overlay');
-  const zone = _zoneForPointer(x, y);
+  let zone = _zoneForPointer(x, y);
   if (!zone) return null;
+  // Shared draggable windows use modalSnap for reserved edge previews and
+  // commits. Keep tileManager's fullscreen/maximize targets available; only
+  // defer the four edge zones that would otherwise paint a duplicate target.
+  // Public chip-drag previews opt out of this deferral.
+  if (deferSharedDock && modal?.dataset?.edgeDockController === '1'
+      && DOCK_ZONE_TO_SIDE[zone.name]) return null;
   // Settings has a dense two-column layout; the full-height sidebar-style dock
   // crushes it. Let it tile only into the normal right half, where the nav can
   // flip to top tabs via CSS when the window gets narrow.
-  if (modal && modal.id === 'settings-modal' && zone.name !== 'right-half') return null;
+  if (modal && modal.id === 'settings-modal' && !SETTINGS_DOCK_ZONES.has(zone.name)) return null;
   if (modal && (modal.id === 'cookbook-modal'
       || modal.id === 'theme-modal')
       && zone.name !== 'fullscreen') return null;
+  const dockSide = DOCK_ZONE_TO_SIDE[zone.name];
+  if (modal && dockSide) {
+    const rect = edgeDockPreviewRect(modal, dockSide);
+    if (!rect) return null;
+    zone = { ...zone, rect };
+  }
   return zone;
 }
 
 function _clearEdgeDockResidue(modal, content) {
   const hadDockState = !!(
-    (modal && (modal.classList.contains('modal-left-docked') || modal.classList.contains('modal-right-docked')))
+    (modal && DOCK_SIDES.some((side) => modal.classList.contains(_dockClassForSide(side))))
     || (content && (content._preDockSnapshot || content._dockSide || content._dockSuspended))
   );
   if (modal) {
-    const hadLeft = modal.classList.contains('modal-left-docked');
-    const hadRight = modal.classList.contains('modal-right-docked');
-    modal.classList.remove('modal-left-docked', 'modal-right-docked');
-    if (hadLeft) _clearDockSide('left', modal);
-    if (hadRight) _clearDockSide('right', modal);
+    const dockedSides = DOCK_SIDES.filter((side) => modal.classList.contains(_dockClassForSide(side)));
+    const hadEmailSnapLeft = modal.classList.contains('email-snap-left');
+    modal.classList.remove(...DOCK_SIDES.map(_dockClassForSide), 'email-snap-left');
+    dockedSides.forEach((side) => _clearDockSide(side, modal));
+    if (hadEmailSnapLeft) {
+      _clearDockSide('left', modal);
+      _clearEmailSplitGeometry();
+    }
     if (modal._dockCloseWatcher) {
       try { modal._dockCloseWatcher.obs && modal._dockCloseWatcher.obs.disconnect(); } catch (_) {}
       try { modal._dockCloseWatcher.parentObs && modal._dockCloseWatcher.parentObs.disconnect(); } catch (_) {}
@@ -179,8 +388,28 @@ function _applySnap(content, rect, zoneName) {
   // zone, which gets worse each time the sidebar is toggled. Clear the
   // orphaned edge-dock state so only the tile-snap positions the window.
   const _modal = content.closest && content.closest('.modal, .research-overlay');
-  const _fromRect = content.getBoundingClientRect();
+  const dockSide = DOCK_ZONE_TO_SIDE[zoneName];
+  if (dockSide && _modal) {
+    const dockSize = applyEdgeDock(_modal, dockSide);
+    if (dockSize) {
+      delete content.dataset._tilePreSnap;
+      delete content.dataset._tileZone;
+      return;
+    }
+    // Reserved edge zones must never degrade into the legacy fixed half-tile
+    // when modalSnap rejects them for insufficient chat space.
+    return;
+  }
+  if (_modal) {
+    const activeDockSide = DOCK_SIDES.find((side) =>
+      _modal.classList.contains(_dockClassForSide(side)));
+    if (activeDockSide) {
+      clearRightDock(_modal, undefined, undefined, _dockClassForSide(activeDockSide));
+    }
+  }
   _clearEdgeDockResidue(_modal, content);
+  const _fromRect = content.getBoundingClientRect();
+  const snapRect = zoneName === 'fullscreen' ? _fullscreenRect() : rect;
 
   // Stash pre-snap geometry once; if we re-snap, keep the original. Capture a
   // CONCRETE fixed position (from the rendered rect when the inline value is
@@ -202,22 +431,45 @@ function _applySnap(content, rect, zoneName) {
   // and CSS that otherwise re-center the .modal-content, which made the snap
   // "jump back to the middle" on release.
   content.style.setProperty('position', 'fixed', 'important');
-  content.style.setProperty('left',   rect.left   + 'px', 'important');
-  content.style.setProperty('top',    rect.top    + 'px', 'important');
-  content.style.setProperty('width',  rect.width  + 'px', 'important');
-  content.style.setProperty('height', rect.height + 'px', 'important');
-  content.style.setProperty('max-height', rect.height + 'px', 'important');
+  content.style.setProperty('left',   snapRect.left   + 'px', 'important');
+  content.style.setProperty('top',    snapRect.top    + 'px', 'important');
+  content.style.setProperty('width',  snapRect.width  + 'px', 'important');
+  content.style.setProperty('max-width', 'none', 'important');
+  content.style.setProperty('height', snapRect.height + 'px', 'important');
+  content.style.setProperty('max-height', snapRect.height + 'px', 'important');
   content.style.setProperty('margin', '0', 'important');
   content.style.setProperty('transform', 'none', 'important');
   content.dataset._tileZone = zoneName;
   setTimeout(() => { content.style.transition = ''; }, 250);
+  _scheduleFullscreenSettle(content, zoneName);
+}
+
+function _scheduleFullscreenSettle(content, zoneName) {
+  if (zoneName !== 'fullscreen' || !_isTouchLandscape() || !content) return;
+  const run = () => {
+    if (!content.isConnected || content.dataset._tileZone !== 'fullscreen') return;
+    _reclampAllThrottled(false);
+  };
+  requestAnimationFrame(run);
+  setTimeout(run, 80);
+  setTimeout(run, 220);
+  setTimeout(run, 520);
 }
 
 function _unsnap(content) {
   const pre = content.dataset._tilePreSnap;
   if (!pre) return;
+  if (_isTouchPortrait()) {
+    [
+      'position', 'left', 'top', 'right', 'bottom', 'width', 'height',
+      'max-width', 'max-height', 'margin', 'transform',
+    ].forEach(p => content.style.removeProperty(p));
+    delete content.dataset._tilePreSnap;
+    delete content.dataset._tileZone;
+    return;
+  }
   // Clear the !important snap props first — Object.assign can't override them.
-  ['position', 'left', 'top', 'width', 'height', 'max-height', 'margin', 'transform']
+  ['position', 'left', 'top', 'width', 'max-width', 'height', 'max-height', 'margin', 'transform']
     .forEach(p => content.style.removeProperty(p));
   try {
     const r = JSON.parse(pre);
@@ -301,11 +553,11 @@ function _reclampAll(animate = false) {
     const W = safe.right - safe.left, H = safe.bottom - safe.top;
     let r;
     switch (name) {
-      case 'fullscreen':     r = { left: 0, top: 0, width: window.innerWidth, height: window.innerHeight }; break;
+      case 'fullscreen':     r = _fullscreenRect(); break;
       case 'maximize':       r = { left: safe.left, top: safe.top, width: W, height: H }; break;
       case 'top-half':       r = { left: safe.left, top: safe.top, width: W, height: H/2 }; break;
       case 'left-half':      r = { left: safe.left, top: safe.top, width: W/2, height: H }; break;
-      case 'right-half':     r = { left: safe.left + W/2, top: safe.top, width: W/2, height: H }; break;
+      case 'right-half':     r = _rightDockPreviewRect(safe); break;
       case 'bottom-half':    r = { left: safe.left, top: safe.top + H/2, width: W, height: H/2 }; break;
       case 'top-left':       r = { left: safe.left, top: safe.top, width: W/2, height: H/2 }; break;
       case 'top-right':      r = { left: safe.left + W/2, top: safe.top, width: W/2, height: H/2 }; break;
@@ -320,6 +572,7 @@ function _reclampAll(animate = false) {
     c.style.setProperty('left', r.left + 'px', 'important');
     c.style.setProperty('top',  r.top  + 'px', 'important');
     c.style.setProperty('width', r.width + 'px', 'important');
+    c.style.setProperty('max-width', 'none', 'important');
     c.style.setProperty('height', r.height + 'px', 'important');
     c.style.setProperty('max-height', r.height + 'px', 'important');
   });
@@ -336,22 +589,34 @@ function _reclampAllThrottled(animate) {
 
 window.addEventListener('resize', () => _reclampAllThrottled(false));
 
-// Watch the sidebar's class attribute so toggling hidden/right-side re-tiles
-// any snapped modal that was anchored to the old safe-rect.
-function _watchSidebar() {
+// Watch nav edge changes so toggling hidden/right-side, or Android landscape
+// cutout handling moving the icon rail, re-tiles any snapped modal that was
+// anchored to the old safe-rect.
+function _watchNavEdges() {
   const sidebar = document.getElementById('sidebar');
-  if (!sidebar) {
+  const rail = document.getElementById('icon-rail');
+  if (!sidebar && !rail) {
     // Sidebar may not be in the DOM yet during early init.
-    requestAnimationFrame(_watchSidebar);
+    requestAnimationFrame(_watchNavEdges);
     return;
   }
   const mo = new MutationObserver(() => _reclampAllThrottled(true));
-  mo.observe(sidebar, { attributes: true, attributeFilter: ['class'] });
+  if (sidebar) mo.observe(sidebar, { attributes: true, attributeFilter: ['class', 'style'] });
+  if (rail) mo.observe(rail, { attributes: true, attributeFilter: ['class', 'style'] });
 }
 if (document.readyState === 'loading') {
-  document.addEventListener('DOMContentLoaded', _watchSidebar);
+  document.addEventListener('DOMContentLoaded', _watchNavEdges);
 } else {
-  _watchSidebar();
+  _watchNavEdges();
+}
+window.addEventListener('orientationchange', () => _reclampAllThrottled(true));
+window.addEventListener('odysseus:cutoutchange', () => _reclampAllThrottled(true));
+if (window.visualViewport) {
+  window.visualViewport.addEventListener('resize', () => _reclampAllThrottled(false));
+  window.visualViewport.addEventListener('scroll', () => _reclampAllThrottled(false));
+}
+if (screen.orientation && screen.orientation.addEventListener) {
+  screen.orientation.addEventListener('change', () => _reclampAllThrottled(true));
 }
 
 // ── Public API for other drag sources (e.g. dragging a minimized dock chip
@@ -363,7 +628,7 @@ export function previewZoneAt(x, y, target = null) {
   const content = target && target.querySelector
     ? (target.querySelector('.modal-content, .research-pane') || target)
     : null;
-  const zone = content ? _zoneForContent(content, x, y) : _zoneForPointer(x, y);
+  const zone = content ? _zoneForContent(content, x, y, false) : _zoneForPointer(x, y);
   if (zone) { _showGhost(zone.rect); _activeZone = zone; }
   else { _hideGhost(); _activeZone = null; }
   return zone;
@@ -387,8 +652,17 @@ export function snapModalToZone(modal, zone) {
   if (!modal || !zone) return;
   const content = modal.querySelector ? (modal.querySelector('.modal-content, .research-pane') || modal) : modal;
   if (!content) return;
-  if (modal.id === 'settings-modal' && zone.name !== 'right-half') return;
-  _applySnap(content, zone.rect, zone.name);
+  if (modal.id === 'settings-modal' && !SETTINGS_DOCK_ZONES.has(zone.name) && !zone.force) return;
+  const rect = zone.name === 'fullscreen' ? _fullscreenRect() : zone.rect;
+  _applySnap(content, rect, zone.name);
+}
+
+export function restoreModalSnap(modal) {
+  if (!modal) return false;
+  const content = modal.querySelector ? (modal.querySelector('.modal-content, .research-pane') || modal) : modal;
+  if (!content || !content.dataset._tilePreSnap) return false;
+  _unsnap(content);
+  return true;
 }
 
 export {};

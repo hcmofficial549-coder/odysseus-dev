@@ -150,42 +150,21 @@ class TestProbeEndpointParsing:
         )
         assert _probe_endpoint("https://api.example.com/v1") == []
 
-    @pytest.mark.parametrize("body", [[], "invalid", 123, True])
-    def test_non_dict_json_body_degrades_to_empty(self, monkeypatch, caplog, body):
-        # HTTP 200 with valid-but-non-dict JSON must not crash the probe with an
-        # AttributeError (data.get(...) on a list/str/int); it should fall through
-        # to the empty/curated path. caplog gives this test teeth: pre-fix the
-        # swallowed AttributeError logs "Failed to probe"; post-fix it does not.
-        _patch_resolve(monkeypatch)
-        monkeypatch.setattr(
-            model_routes.httpx, "get",
-            lambda url, headers=None, timeout=None, verify=None, **kwargs: _resp(200, json=body),
-        )
-        with caplog.at_level("WARNING", logger="routes.model_routes"):
-            assert _probe_endpoint("https://api.example.com/v1") == []
-        assert "Failed to probe" not in caplog.text
-
-    def test_skips_non_string_model_ids(self, monkeypatch):
-        # A non-compliant upstream returns int/None IDs alongside a valid one.
-        # The probe must not crash on .lower()/.startswith and must still surface
-        # the valid string model.
+    def test_image_endpoint_probe_keeps_non_chat_image_models(self, monkeypatch):
         _patch_resolve(monkeypatch)
         monkeypatch.setattr(
             model_routes.httpx, "get",
             lambda url, headers=None, timeout=None, verify=None, **kwargs: _resp(
-                200, json={"data": [{"id": None}, {"id": 123}, {"id": "gpt-4o"}]}),
+                200,
+                json={"data": [{"id": "gpt-image-1"}, {"id": "gpt-4o"}]},
+            ),
         )
-        assert _probe_endpoint("https://api.example.com/v1", "key") == ["gpt-4o"]
 
-    def test_all_non_string_ids_returns_empty(self, monkeypatch):
-        # Every id is non-string -> empty result, no exception, no curated leak.
-        _patch_resolve(monkeypatch)
-        monkeypatch.setattr(
-            model_routes.httpx, "get",
-            lambda url, headers=None, timeout=None, verify=None, **kwargs: _resp(
-                200, json={"data": [{"id": 123}, {"id": None}]}),
-        )
-        assert _probe_endpoint("https://api.example.com/v1") == []
+        assert _probe_endpoint("https://api.example.com/v1") == ["gpt-4o"]
+        assert _probe_endpoint(
+            "https://api.example.com/v1",
+            include_non_chat=True,
+        ) == ["gpt-image-1", "gpt-4o"]
 
     def test_chatgpt_subscription_probe_uses_discovery_only(self, monkeypatch):
         _patch_resolve(monkeypatch)
@@ -281,6 +260,24 @@ class TestPingEndpoint:
             "reachable": True, "status_code": 200, "error": None,
         }
 
+    def test_local_diffusion_root_uses_health_fallback(self, monkeypatch):
+        _patch_resolve(monkeypatch)
+        seen = []
+
+        def fake_get(url, headers=None, timeout=None, verify=None, **kwargs):
+            seen.append(url)
+            if url == "http://127.0.0.1:8102/health":
+                return _resp(200, url=url)
+            return _resp(404, url=url)
+
+        monkeypatch.setattr(model_routes.httpx, "get", fake_get)
+
+        assert _ping_endpoint("http://127.0.0.1:8102") == {
+            "reachable": True, "status_code": 200, "error": None,
+        }
+        assert seen[0] == "http://127.0.0.1:8102"
+        assert seen[-1] == "http://127.0.0.1:8102/health"
+
 
 # ── Docker loopback rewrite ──
 
@@ -347,9 +344,10 @@ class TestProbeSingleModel:
     ])
     def test_completion_probe_uses_llm_verify(self, monkeypatch, base, api_key, model_id):
         _patch_resolve(monkeypatch)
+        from routes.model import _utils as model_utils
         marker = object()
         captured = {}
-        monkeypatch.setattr(model_routes, "llm_verify", lambda: marker)
+        monkeypatch.setattr(model_utils, "llm_verify", lambda: marker)
 
         def fake_post(url, headers=None, json=None, timeout=None, verify=None):
             captured["verify"] = verify

@@ -15,18 +15,22 @@ import pytest
 from routes.shell_routes import (
     _find_line_break,
     _host_docker_access_enabled,
-    _import_optional_dependency_for_status,
+    _require_admin,
     _running_in_container,
     _docker_row_status,
+    _image_runtime_python,
     _package_installed_from_probe,
     _package_pip_update_status,
+    _probe_package_with_python,
     _package_probe_script,
     _package_status_note,
     _prepend_user_install_bins_to_path,
     _reject_cross_site,
     _ssh_base_argv,
+    _status_note_with_runtime,
     _venv_activate_prefix,
     DOCKER_IN_CONTAINER_HINT,
+    IMAGE_RUNTIME_PACKAGE_NAMES,
 )
 
 
@@ -83,6 +87,18 @@ async def test_generate_pty_reports_explicit_unsupported_error(monkeypatch):
         },
         {"exit_code": -1, "error": shell_routes.PTY_UNSUPPORTED_ERROR},
     ]
+
+
+def test_require_admin_allows_auth_disabled_local_mode(monkeypatch):
+    """Shell routes should match the shared admin helper in AUTH_ENABLED=false mode."""
+
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    request = SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(auth_manager=object())),
+        state=SimpleNamespace(current_user=None),
+    )
+
+    _require_admin(request)
 
 
 class TestFindLineBreak:
@@ -291,6 +307,9 @@ class TestHostDockerAccess:
         assert _host_docker_access_enabled(str(socket_path)) is False
 
     @pytest.mark.parametrize("flag", [None, "false"])
+    @pytest.mark.skipif(
+        not hasattr(socket, "AF_UNIX"), reason="Unix-domain sockets unavailable"
+    )
     def test_socket_without_explicit_opt_in_is_disabled(
         self,
         monkeypatch,
@@ -307,6 +326,9 @@ class TestHostDockerAccess:
 
             assert _host_docker_access_enabled(str(socket_path)) is False
 
+    @pytest.mark.skipif(
+        not hasattr(socket, "AF_UNIX"), reason="Unix-domain sockets unavailable"
+    )
     def test_explicit_opt_in_with_unix_socket_is_enabled(
         self,
         monkeypatch,
@@ -414,6 +436,73 @@ class TestPackageProbeStatus:
         assert _package_installed_from_probe("diffusers", missing_torch) is False
         assert _package_installed_from_probe("diffusers", ready) is True
 
+    def test_onnxruntime_directml_requires_directml_provider(self):
+        missing_provider = {
+            "modules": {"onnxruntime": {"found": True, "real_module": True}},
+            "dists": {"onnxruntime-directml": "1.23.2"},
+            "binaries": {},
+            "providers": ["CPUExecutionProvider"],
+        }
+        ready = {
+            "modules": {"onnxruntime": {"found": True, "real_module": True}},
+            "dists": {"onnxruntime-directml": "1.23.2"},
+            "binaries": {},
+            "providers": ["DmlExecutionProvider", "CPUExecutionProvider"],
+        }
+
+        assert _package_installed_from_probe("onnxruntime-directml", missing_provider) is False
+        assert _package_installed_from_probe("onnxruntime-directml", ready) is True
+        assert "DirectML provider not available" in _package_status_note("onnxruntime-directml", missing_provider)
+        assert "onnxruntime-directml 1.23.2" in _package_status_note("onnxruntime-directml", ready)
+
+    def test_onnxruntime_cpu_row_accepts_gpu_runtime_distribution(self):
+        probe = {
+            "modules": {"onnxruntime": {"found": True, "real_module": True}},
+            "dists": {"onnxruntime-directml": "1.23.2"},
+            "binaries": {},
+            "providers": ["DmlExecutionProvider", "CPUExecutionProvider"],
+        }
+
+        assert _package_installed_from_probe("onnxruntime", probe) is True
+        assert "onnxruntime-directml 1.23.2" in _package_status_note("onnxruntime", probe)
+
+    def test_image_runtime_python_prefers_dedicated_venv(self, monkeypatch, tmp_path):
+        import routes.shell_routes as shell_routes
+
+        py = tmp_path / ".image-venv" / "Scripts" / "python.exe"
+        py.parent.mkdir(parents=True)
+        py.write_text("", encoding="utf-8")
+        monkeypatch.setattr(shell_routes, "BASE_DIR", str(tmp_path))
+
+        assert _image_runtime_python() == py
+
+    def test_package_probe_can_run_under_specific_python(self):
+        probe = _probe_package_with_python(Path(sys.executable), "json")
+
+        assert probe is not None
+        assert probe["runtime_python"] == sys.executable
+        assert probe["modules"]["json"]["real_module"] is True
+
+    def test_image_runtime_probe_note_and_update_status(self):
+        probe = {
+            "modules": {"onnxruntime": {"found": True, "real_module": True}},
+            "dists": {"onnxruntime-directml": "1.23.2"},
+            "binaries": {},
+            "providers": ["DmlExecutionProvider", "CPUExecutionProvider"],
+            "runtime_python": "D:\\Odysseus\\.image-venv\\Scripts\\python.exe",
+        }
+
+        status = _package_pip_update_status(
+            {"name": "onnxruntime-directml", "pip": "onnxruntime-directml"},
+            probe,
+        )
+
+        assert "onnxruntime-directml 1.23.2" in _status_note_with_runtime("onnxruntime-directml", probe)
+        assert "image runtime:" in _status_note_with_runtime("onnxruntime-directml", probe)
+        assert status.available is False
+        assert "image runtime Python" in status.note
+        assert "onnxruntime-directml" in IMAGE_RUNTIME_PACKAGE_NAMES
+
     def test_local_user_install_bin_is_added_to_path(self, monkeypatch, tmp_path):
         user_base = tmp_path / "user-base"
         monkeypatch.setattr("site.USER_BASE", str(user_base))
@@ -434,25 +523,12 @@ class TestPackageProbeStatus:
         assert "add_user_install_bins_to_path()" in script
         assert "shutil.which(b)" in script
 
-    def test_status_import_prepares_optional_dependency(self, monkeypatch):
-        import routes.shell_routes as shell_routes
+    def test_remote_package_probe_checks_onnxruntime_providers(self):
+        script = _package_probe_script(["onnxruntime-directml"])
 
-        calls = []
-        monkeypatch.setattr(
-            shell_routes,
-            "prepare_optional_dependency_import",
-            lambda name: calls.append(name),
-        )
-        monkeypatch.setattr(
-            shell_routes.importlib,
-            "import_module",
-            lambda name: SimpleNamespace(__name__=name),
-        )
-
-        module = _import_optional_dependency_for_status("realesrgan")
-
-        assert module.__name__ == "realesrgan"
-        assert calls == ["realesrgan"]
+        assert "'onnxruntime-directml':['onnxruntime-directml']" in script
+        assert "'onnxruntime-directml':['onnxruntime']" in script
+        assert "ort.get_available_providers()" in script
 
 
 class TestSshBaseArgv:

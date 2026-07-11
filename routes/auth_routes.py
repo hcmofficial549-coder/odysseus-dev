@@ -2,7 +2,7 @@
 
 from fastapi import APIRouter, Request, Response, HTTPException
 from pydantic import BaseModel
-from typing import Optional
+from typing import Any, Dict, Optional
 import asyncio
 import logging
 import os
@@ -15,6 +15,7 @@ from core.atomic_io import atomic_write_json, atomic_write_text
 from core.auth import AuthManager, RESERVED_USERNAMES, SetAdminResult, TOKEN_TTL
 from src.constants import DEEP_RESEARCH_DIR, MEMORY_FILE, PASSWORD_MIN_LENGTH, SKILLS_DIR
 from src.rate_limiter import RateLimiter
+import src.security_audit as security_audit
 from src.settings_scrub import scrub_settings
 from src.settings import (
     load_settings as _load_settings,
@@ -81,6 +82,31 @@ class SetAdminRequest(BaseModel):
 class SetOpenRegistrationRequest(BaseModel):
     enabled: bool
 
+
+class LdapSettingsRequest(BaseModel):
+    enabled: Optional[bool] = None
+    server_uri: Optional[str] = None
+    bind_dn: Optional[str] = None
+    bind_password: Optional[str] = None
+    clear_bind_password: bool = False
+    user_base_dn: Optional[str] = None
+    user_filter: Optional[str] = None
+    user_name_attribute: Optional[str] = None
+    display_name_attribute: Optional[str] = None
+    email_attribute: Optional[str] = None
+    group_base_dn: Optional[str] = None
+    group_filter: Optional[str] = None
+    allowed_groups: Optional[Any] = None
+    admin_groups: Optional[Any] = None
+    start_tls: Optional[bool] = None
+    connect_timeout: Optional[float] = None
+
+
+class LdapTestLoginRequest(BaseModel):
+    username: str
+    password: str
+    settings: Optional[LdapSettingsRequest] = None
+
 SESSION_COOKIE = "odysseus_session"
 
 
@@ -111,6 +137,11 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
         ok = await asyncio.to_thread(auth_manager.setup, body.username, body.password)
         if not ok:
             raise HTTPException(500, "Setup failed")
+        await security_audit.log_security_event_async(
+            security_audit.SETUP_COMPLETED,
+            actor=body.username.strip().lower(),
+            request=request,
+        )
         return {"ok": True, "message": "Admin account created"}
 
     @router.post("/signup")
@@ -131,27 +162,78 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
         ok = await asyncio.to_thread(auth_manager.create_user, body.username, body.password, is_admin=False)
         if not ok:
             raise HTTPException(409, "Username already taken")
+        signup_user = body.username.strip().lower()
+        await security_audit.log_security_event_async(
+            security_audit.USER_CREATED,
+            actor=signup_user,
+            target=signup_user,
+            detail="source=signup; is_admin=false",
+            request=request,
+        )
         return {"ok": True, "message": "Account created"}
 
     @router.post("/login")
     async def login(body: LoginRequest, request: Request, response: Response):
         if not _login_limiter.check(request.client.host):
             raise HTTPException(429, "Too many requests — try again later")
-        # Verify password first
+        # Verify local password first. If that fails, LDAP may be tried only
+        # for unknown usernames or existing LDAP-shadow users; local accounts
+        # deliberately win to prevent directory-name takeover.
         username = body.username.strip().lower()
-        if not await asyncio.to_thread(auth_manager.verify_password, username, body.password):
-            raise HTTPException(401, "Invalid credentials")
+        password_ok = await asyncio.to_thread(auth_manager.verify_password, username, body.password)
+        if not password_ok:
+            can_attempt_ldap = await asyncio.to_thread(auth_manager.can_attempt_ldap, username)
+            if not can_attempt_ldap:
+                await security_audit.log_security_event_async(
+                    security_audit.LOGIN_FAILURE,
+                    actor=username,
+                    success=False,
+                    detail="invalid credentials",
+                    request=request,
+                )
+                raise HTTPException(401, "Invalid credentials")
+            ldap_username = await asyncio.to_thread(auth_manager.authenticate_ldap, username, body.password)
+            if not ldap_username:
+                await security_audit.log_security_event_async(
+                    security_audit.LOGIN_FAILURE,
+                    actor=username,
+                    success=False,
+                    detail="invalid credentials",
+                    request=request,
+                )
+                raise HTTPException(401, "Invalid credentials")
+            username = ldap_username
         # Check 2FA if enabled
         if auth_manager.totp_enabled(username):
             if not body.totp_code:
                 # Password OK but need TOTP — tell client to show code input
                 return {"ok": False, "requires_totp": True, "username": username}
             if not auth_manager.totp_verify(username, body.totp_code):
+                await security_audit.log_security_event_async(
+                    security_audit.MFA_VERIFY_FAILURE,
+                    actor=username,
+                    success=False,
+                    detail="invalid totp",
+                    request=request,
+                )
                 raise HTTPException(401, "Invalid 2FA code")
         # All checks passed — create session (password already verified above)
         token = await asyncio.to_thread(auth_manager.create_session_trusted, username)
         if not token:
+            await security_audit.log_security_event_async(
+                security_audit.LOGIN_FAILURE,
+                actor=username,
+                success=False,
+                detail="session creation failed",
+                request=request,
+            )
             raise HTTPException(401, "Invalid credentials")
+        await security_audit.log_security_event_async(
+            security_audit.LOGIN_SUCCESS,
+            actor=username,
+            success=True,
+            request=request,
+        )
         cookie_kwargs = dict(
             key=SESSION_COOKIE,
             value=token,
@@ -168,9 +250,19 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
     @router.post("/logout")
     async def logout(request: Request, response: Response):
         token = request.cookies.get(SESSION_COOKIE)
+        user = _get_current_user(request)
         if token:
             auth_manager.revoke_token(token)
         response.delete_cookie(SESSION_COOKIE, path="/")
+        # /logout is intentionally reachable with an expired/missing session
+        # so clients can always clear their cookie. Do not let anonymous calls
+        # manufacture successful audit rows or grow the database indefinitely.
+        if user:
+            await security_audit.log_security_event_async(
+                security_audit.LOGOUT,
+                actor=user,
+                request=request,
+            )
         return {"ok": True}
 
     @router.get("/status")
@@ -205,8 +297,21 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
         current_token = request.cookies.get(SESSION_COOKIE)
         ok = await asyncio.to_thread(auth_manager.change_password, user, body.current_password, body.new_password)
         if not ok:
+            await security_audit.log_security_event_async(
+                security_audit.PASSWORD_CHANGE,
+                actor=user,
+                success=False,
+                detail="current password incorrect",
+                request=request,
+            )
             raise HTTPException(400, "Current password is incorrect")
         await asyncio.to_thread(auth_manager.revoke_user_sessions, user, current_token)
+        await security_audit.log_security_event_async(
+            security_audit.PASSWORD_CHANGE,
+            actor=user,
+            success=True,
+            request=request,
+        )
         return {"ok": True}
 
     # ------------------------------------------------------------------
@@ -244,6 +349,11 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
             raise HTTPException(401, "Not authenticated")
         if not auth_manager.totp_confirm_enable(user, body.code):
             raise HTTPException(400, "Invalid code — try again")
+        await security_audit.log_security_event_async(
+            security_audit.MFA_ENABLED,
+            actor=user,
+            request=request,
+        )
         backup = auth_manager.users.get(user, {}).get("totp_backup_codes", [])
         return {"ok": True, "backup_codes": backup}
 
@@ -257,7 +367,19 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
         if not user:
             raise HTTPException(401, "Not authenticated")
         if not auth_manager.totp_disable(user, body.password):
+            await security_audit.log_security_event_async(
+                security_audit.MFA_DISABLED,
+                actor=user,
+                success=False,
+                detail="invalid password",
+                request=request,
+            )
             raise HTTPException(400, "Invalid password")
+        await security_audit.log_security_event_async(
+            security_audit.MFA_DISABLED,
+            actor=user,
+            request=request,
+        )
         return {"ok": True}
 
     @router.get("/2fa/status")
@@ -276,6 +398,44 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
             raise HTTPException(403, "Admin only")
         return {"users": auth_manager.list_users()}
 
+    @router.get("/ldap-settings")
+    async def get_ldap_settings(request: Request):
+        user = _get_current_user(request)
+        if not user or not auth_manager.is_admin(user):
+            raise HTTPException(403, "Admin only")
+        return auth_manager.ldap_settings()
+
+    @router.post("/ldap-settings")
+    async def set_ldap_settings(body: LdapSettingsRequest, request: Request):
+        user = _get_current_user(request)
+        if not user or not auth_manager.is_admin(user):
+            raise HTTPException(403, "Admin only")
+        try:
+            result = auth_manager.set_ldap_settings(body.model_dump(exclude_none=True))
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        await security_audit.log_security_event_async(
+            security_audit.LDAP_SETTINGS_UPDATED,
+            actor=user,
+            request=request,
+        )
+        return result
+
+    @router.post("/ldap-settings/test")
+    async def test_ldap_settings(body: LdapTestLoginRequest, request: Request):
+        user = _get_current_user(request)
+        if not user or not auth_manager.is_admin(user):
+            raise HTTPException(403, "Admin only")
+        settings: Optional[Dict[str, Any]] = None
+        if body.settings is not None:
+            settings = body.settings.model_dump(exclude_none=True)
+        return await asyncio.to_thread(
+            auth_manager.ldap_test_login,
+            body.username,
+            body.password,
+            settings,
+        )
+
     @router.post("/users")
     async def admin_create_user(body: CreateUserRequest, request: Request):
         user = _get_current_user(request)
@@ -290,6 +450,13 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
         ok = auth_manager.create_user(body.username, body.password, body.is_admin)
         if not ok:
             raise HTTPException(409, "Username already taken")
+        await security_audit.log_security_event_async(
+            security_audit.USER_CREATED,
+            actor=user,
+            target=body.username.strip().lower(),
+            detail=f"is_admin={body.is_admin}",
+            request=request,
+        )
         return {"ok": True}
 
     @router.put("/users/{username}/privileges")
@@ -301,7 +468,15 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
         ok = auth_manager.set_privileges(username, body)
         if not ok:
             raise HTTPException(404, "User not found or is admin")
-        return {"ok": True, "privileges": auth_manager.get_privileges(username)}
+        target = (username or "").strip().lower()
+        privileges = auth_manager.get_privileges(username)
+        await security_audit.log_security_event_async(
+            security_audit.PRIVILEGES_UPDATED,
+            actor=user,
+            target=target,
+            request=request,
+        )
+        return {"ok": True, "privileges": privileges}
 
     @router.put("/users/{username}/rename")
     async def rename_user(username: str, body: RenameUserRequest, request: Request):
@@ -524,6 +699,12 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
         invalidator = getattr(request.app.state, "invalidate_token_cache", None)
         if callable(invalidator):
             invalidator()
+        await security_audit.log_security_event_async(
+            security_audit.USER_RENAME,
+            actor=user,
+            target=f"{old_username}->{new_username}",
+            request=request,
+        )
         return {"ok": True, "username": new_username, "renamed_self": old_username == user}
 
     @router.put("/users/{username}/admin")
@@ -537,6 +718,8 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
         user = _get_current_user(request)
         if not user or not auth_manager.is_admin(user):
             raise HTTPException(403, "Admin only")
+        target = (username or "").strip().lower()
+        was_admin = auth_manager.is_admin(target)
         result = auth_manager.set_admin(username, body.is_admin, user)
         if result is SetAdminResult.USER_NOT_FOUND:
             raise HTTPException(404, "User not found")
@@ -544,7 +727,15 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
             raise HTTPException(403, "Admin only")
         if result is SetAdminResult.LAST_ADMIN:
             raise HTTPException(400, "Cannot demote the last admin")
-        target = (username or "").strip().lower()
+        if result is SetAdminResult.LDAP_MANAGED:
+            raise HTTPException(400, "LDAP group configuration manages this user's admin status")
+        if was_admin != body.is_admin:
+            await security_audit.log_security_event_async(
+                security_audit.USER_ADMIN_SET if body.is_admin else security_audit.USER_ADMIN_REVOKE,
+                actor=user,
+                target=target,
+                request=request,
+            )
         return {
             "ok": True,
             "is_admin": body.is_admin,
@@ -565,6 +756,12 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
         if not user or not auth_manager.is_admin(user):
             raise HTTPException(403, "Admin only")
         auth_manager.signup_enabled = not auth_manager.signup_enabled
+        await security_audit.log_security_event_async(
+            security_audit.SIGNUP_POLICY_UPDATED,
+            actor=user,
+            detail=f"enabled={auth_manager.signup_enabled}",
+            request=request,
+        )
         return {"ok": True, "signup_enabled": auth_manager.signup_enabled}
 
     @router.put("/open-signup")
@@ -574,7 +771,81 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
         if not user or not auth_manager.is_admin(user):
             raise HTTPException(403, "Admin only")
         auth_manager.signup_enabled = body.enabled
+        await security_audit.log_security_event_async(
+            security_audit.SIGNUP_POLICY_UPDATED,
+            actor=user,
+            detail=f"enabled={auth_manager.signup_enabled}",
+            request=request,
+        )
         return {"ok": True,"signup_enabled": auth_manager.signup_enabled}
+
+    @router.get("/audit-log")
+    async def get_audit_log(request: Request):
+        """Return security audit log (admin only).
+
+        Supports query params: limit, offset, event_type, actor, success.
+        """
+        user = _get_current_user(request)
+        if not user or not auth_manager.is_admin(user):
+            raise HTTPException(403, "Admin only")
+        try:
+            limit = max(1, min(int(request.query_params.get("limit", "100")), 500))
+            offset = max(int(request.query_params.get("offset", "0")), 0)
+        except ValueError:
+            limit, offset = 100, 0
+        event_type = request.query_params.get("event_type")
+        actor = request.query_params.get("actor")
+        success = request.query_params.get("success")
+        success_filter = None
+        if success is not None:
+            normalized_success = success.strip().lower()
+            if normalized_success not in {"true", "false"}:
+                raise HTTPException(400, "success must be true or false")
+            success_filter = normalized_success == "true"
+
+        def _read_audit_log():
+            from sqlalchemy import desc
+            from core.database import SessionLocal, SecurityEvent
+
+            db = SessionLocal()
+            try:
+                query = db.query(SecurityEvent)
+                if event_type:
+                    query = query.filter(SecurityEvent.event_type == event_type)
+                if actor:
+                    query = query.filter(SecurityEvent.actor.ilike(actor))
+                if success_filter is not None:
+                    query = query.filter(SecurityEvent.success == success_filter)
+                total = query.count()
+                rows = (
+                    query.order_by(desc(SecurityEvent.created_at))
+                    .offset(offset)
+                    .limit(limit)
+                    .all()
+                )
+                return {
+                    "total": total,
+                    "offset": offset,
+                    "limit": limit,
+                    "events": [
+                        {
+                            "id": event.id,
+                            "event_type": event.event_type,
+                            "actor": event.actor,
+                            "target": event.target,
+                            "success": event.success,
+                            "ip": event.ip,
+                            "user_agent": event.user_agent,
+                            "detail_text": event.detail_text,
+                            "created_at": event.created_at.isoformat() if event.created_at else None,
+                        }
+                        for event in rows
+                    ],
+                }
+            finally:
+                db.close()
+
+        return await asyncio.to_thread(_read_audit_log)
 
     @router.delete("/users")
     async def admin_delete_user(body: DeleteUserRequest, request: Request):
@@ -606,6 +877,12 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
         # cached token keeps authenticating until some other token op or a
         # restart clears the cache. Mirror what the token routes do.
         _invalidate_api_token_cache()
+        await security_audit.log_security_event_async(
+            security_audit.USER_DELETED,
+            actor=user,
+            target=body.username.strip().lower(),
+            request=request,
+        )
         return {"ok": True}
 
     # ---- Feature visibility (admin-managed) ----
@@ -651,9 +928,9 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
         body = await request.json()
         current = _load_settings()
         # Per-key validation for numeric settings: coerce to int and clamp to a
-        # sane range so a bad value can't disable the agent or let it run away.
+        # sane range. For agent limits, 0 means unlimited where noted below.
         _INT_RANGES = {
-            "agent_max_rounds": (1, 200),
+            "agent_max_rounds": (0, 200),  # 0 = unlimited
             "agent_max_tool_calls": (0, 1000),  # 0 = unlimited
         }
         for key in DEFAULT_SETTINGS:
@@ -735,6 +1012,11 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
         if not integ:
             raise HTTPException(404, "Integration not found")
         preset = (integ.get("preset") or integ.get("name", "")).lower()
+
+        if preset in {"comfyui_local", "comfyui local", "runcomfy_cloud", "runcomfy cloud", "runcomfy"}:
+            from src.runcomfy_media import test_media_integration
+
+            return await test_media_integration(integ)
 
         # ntfy is special: a GET / proves the server is reachable but
         # publishes nothing, so the user has no way to know whether

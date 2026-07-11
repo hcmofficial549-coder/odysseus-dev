@@ -1,9 +1,85 @@
 {
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/pewdiepie-archdaemon/odysseus.git"
-  },
-  "devDependencies": {
-    "@antithesishq/bombadil": "^0.6.1"
-  }
+    "name":  "odysseus",
+    "version":  "1.0.10",
+    "main":  "main.js",
+    "scripts":  {
+                    "start":  "electron .",
+                    "pack":  "electron-builder --dir",
+                    "dist":  "electron-builder"
+                },
+    "repository":  {
+                       "type":  "git",
+                       "url":  "https://github.com/falabellamichael/Odysseus-Simple-Signal.git"
+                   },
+    "devDependencies":  {
+                            "@antithesishq/bombadil":  "^0.3.2",
+                            "electron":  "^42.4.0",
+                            "electron-builder":  "^26.15.3",
+                            "wait-on":  "^9.0.10"
+                        },
+    "dependencies":  {
+                         "@anthropic-ai/sdk":  "^0.98.0"
+                     },
+    "build":  {
+                  "compression":  "maximum",
+                  "electronLanguages":  [
+                                            "en-US"
+                                        ],
+                  "directories":  {
+                                      "output":  "electron-dist"
+                                  },
+                  "files":  [
+                                "main.js",
+                                "startup-preload.js",
+                                "package.json",
+                                "node_modules/**/*"
+                            ],
+                  "productName":  "Simple Signal",
+                  "artifactName":  "Simple-Signal-Standalone-Setup-${version}.${ext}",
+                  "extraFiles":  [
+                                     "app.py",
+                                     "core/**/*",
+                                     "routes/**/*",
+                                     "src/**/*",
+                                     "services/**/*",
+                                     "config/**/*",
+                                     "static/**/*",
+                                     "mcp_servers/**/*",
+                                     "integrations/**/*",
+                                     "companion/**/*",
+                                     "!**/*.bak",
+                                     "!**/*.pyc",
+                                     "!**/__pycache__/**",
+                                     {
+                                         "from": "scripts",
+                                         "to": "scripts",
+                                         "filter": [
+                                             "**/*",
+                                             "!patch_fix.py",
+                                             "!**/*.bak",
+                                             "!**/*.pyc",
+                                             "!**/__pycache__/**"
+                                         ]
+                                     },
+                                     "connect-android-pc.bat",
+                                     "launch-windows.ps1",
+                                     "requirements.txt",
+                                     "setup.py",
+                                     ".env.example"
+                                 ],
+                  "win":  {
+                              "target":  "nsis",
+                              "icon":  "static/icon.ico"
+                          },
+                  "nsis":  {
+                               "createDesktopShortcut":  "always",
+                               "createStartMenuShortcut":  true,
+                               "shortcutName":  "Simple Signal",
+                               "installerIcon":  "static/icon.ico",
+                               "uninstallerIcon":  "static/icon.ico",
+                               "installerHeaderIcon":  "static/icon.ico",
+                               "include":  "installer.nsh"
+                           },
+                  "appId":  "com.odysseus.simplesignal"
+              }
 }

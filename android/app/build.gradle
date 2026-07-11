@@ -1,0 +1,121 @@
+plugins {
+    id "com.android.application"
+}
+
+def releaseKeystorePropertiesFile = rootProject.file("keystore.properties")
+def releaseKeystoreProperties = new Properties()
+if (releaseKeystorePropertiesFile.exists()) {
+    releaseKeystorePropertiesFile.withInputStream { stream ->
+        releaseKeystoreProperties.load(stream)
+    }
+}
+def releaseSigningKeys = ["storeFile", "storePassword", "keyAlias", "keyPassword"]
+def hasReleaseSigningConfig = releaseSigningKeys.every { key ->
+    releaseKeystoreProperties.getProperty(key)?.trim()
+}
+
+def odysseusDefaultUrl = providers.gradleProperty("ODYSSEUS_ANDROID_URL")
+        .orElse("http://10.0.2.2:7000")
+        .get()
+def odysseusAdbReverseUrl = providers.gradleProperty("ODYSSEUS_ANDROID_ADB_URL")
+        .orElse("http://127.0.0.1:7000")
+        .get()
+
+android {
+    namespace = "com.odysseus.simplesignal"
+    compileSdk = 34
+
+    defaultConfig {
+        applicationId = "com.odysseus.simplesignal"
+        minSdk = 26
+        targetSdk = 34
+        versionCode = 25
+        versionName = "1.0.25"
+
+        ndk {
+            // Keep native payloads phone-sized when native modules are enabled.
+            abiFilters "arm64-v8a"
+        }
+
+        buildConfigField "String", "ODYSSEUS_DEFAULT_URL", "\"${odysseusDefaultUrl}\""
+        buildConfigField "String", "ODYSSEUS_ADB_REVERSE_URL", "\"${odysseusAdbReverseUrl}\""
+    }
+
+    signingConfigs {
+        release {
+            if (hasReleaseSigningConfig) {
+                storeFile = rootProject.file(releaseKeystoreProperties.getProperty("storeFile").trim())
+                storePassword = releaseKeystoreProperties.getProperty("storePassword").trim()
+                keyAlias = releaseKeystoreProperties.getProperty("keyAlias").trim()
+                keyPassword = releaseKeystoreProperties.getProperty("keyPassword").trim()
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            signingConfig = signingConfigs.release
+        }
+    }
+
+    buildFeatures {
+        buildConfig = true
+    }
+
+    sourceSets {
+        main {
+            assets.srcDirs += ["../../static"]
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+        }
+    }
+
+    packaging {
+        jniLibs {
+            // Compress native libraries when any are bundled into the APK.
+            useLegacyPackaging = true
+            // ONNX Runtime's Java bindings are small and must be dexed at build
+            // time, but its native libraries are installed later from Cookbook.
+            excludes += [
+                    "**/libonnxruntime.so",
+                    "**/libonnxruntime4j_jni.so",
+            ]
+        }
+        resources {
+            excludes += [
+                    "META-INF/LICENSE.md",
+                    "META-INF/NOTICE.md",
+            ]
+        }
+    }
+}
+
+dependencies {
+    implementation "com.sun.mail:android-mail:1.6.7"
+    implementation "com.sun.mail:android-activation:1.6.7"
+    // Classes-only ONNX Runtime jar with Android's forced System.loadLibrary
+    // branch patched out. Native libs are installed by Cookbook on demand.
+    implementation files("libs/onnxruntime-android-1.26.0-patched-loader.jar")
+}
+
+gradle.taskGraph.whenReady { graph ->
+    def releaseBuildRequested = graph.allTasks.any { task ->
+        def name = task.name.toLowerCase()
+        name.contains("release") && (name.startsWith("assemble")
+                || name.startsWith("bundle")
+                || name.startsWith("package")
+                || name.startsWith("sign"))
+    }
+    if (releaseBuildRequested && !hasReleaseSigningConfig) {
+        throw new GradleException("Release signing is not configured. Copy android/keystore.properties.example to android/keystore.properties and set storeFile, storePassword, keyAlias, and keyPassword.")
+    }
+}

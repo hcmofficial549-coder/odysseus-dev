@@ -39,7 +39,8 @@ try:
         _classify_agent_request,
         _compute_final_metrics,
         _append_tool_results,
-        _insert_before_latest_user,
+        _assemble_prompt,
+        _uploaded_files_context_message,
         _MCP_KEYWORDS,
     )
     _IMPORTED_AGENT_LOOP = sys.modules.get("src.agent_loop")
@@ -64,44 +65,50 @@ def test_mcp_keyword_gate_matches_literal_mcp_requests():
     assert "mcp" in _MCP_KEYWORDS
 
 
-def test_polish_internet_search_request_classifies_as_web():
-    intent = _classify_agent_request(
-        [],
-        "Wyszukaj w internecie i podaj temperaturę w Lubartowie dzisiaj",
-    )
+def test_agent_prompt_allows_shell_writes_and_steers_to_action():
+    prompt = _assemble_prompt({
+        "bash", "python", "read_file", "write_file", "edit_file",
+        "grep", "glob", "ls", "get_workspace",
+    })
 
-    assert intent["low_signal"] is False
-    assert "web" in intent["domains"]
-
-
-def test_insert_before_latest_user_places_context_before_last_user_turn():
-    messages = [
-        {"role": "user", "content": "first"},
-        {"role": "assistant", "content": "reply"},
-        {"role": "user", "content": "latest"},
-    ]
-    context = {"role": "system", "content": "context"}
-
-    out = _insert_before_latest_user(messages, context)
-
-    assert out == [
-        {"role": "user", "content": "first"},
-        {"role": "assistant", "content": "reply"},
-        context,
-        {"role": "user", "content": "latest"},
-    ]
-    assert messages == [
-        {"role": "user", "content": "first"},
-        {"role": "assistant", "content": "reply"},
-        {"role": "user", "content": "latest"},
-    ]
+    assert "shell/PowerShell" in prompt
+    assert "may create or edit files" in prompt
+    assert "do not keep reading files to avoid acting" in prompt
+    assert "NEVER use bash to create or change files" not in prompt
+    assert "Do NOT create or edit files via bash" not in prompt
+    assert "not for reading or writing files" not in prompt
 
 
-def test_insert_before_latest_user_appends_when_no_user_message_exists():
-    messages = [{"role": "assistant", "content": "reply"}]
-    context = {"role": "system", "content": "context"}
+def test_native_tool_schemas_allow_shell_and_python_file_writes():
+    from src.tool_schemas import FUNCTION_TOOL_SCHEMAS
 
-    assert _insert_before_latest_user(messages, context) == [messages[0], context]
+    descriptions = {
+        schema["function"]["name"]: schema["function"].get("description", "")
+        for schema in FUNCTION_TOOL_SCHEMAS
+    }
+
+    assert "shell/PowerShell may create or edit files" in descriptions["bash"]
+    assert "Python may read, write, or edit files" in descriptions["python"]
+    assert "use shell/Python when a scripted edit is more practical" in descriptions["edit_file"]
+    assert "Do NOT create or edit files via bash" not in descriptions["bash"]
+
+
+def test_uploaded_files_context_allows_current_and_historical_attachments():
+    context = _uploaded_files_context_message([{
+        "id": "upload-1",
+        "name": "C:\\server-secret\\earlier.pdf",
+        "mime": "application/pdf",
+        "size": 42,
+        "uri": "odysseus://attachment/upload-1",
+    }])
+
+    assert context is not None
+    assert "current or earlier user turns" in context["content"]
+    assert "latest user turn" not in context["content"]
+    assert "read_attachment" in context["content"]
+    assert "odysseus://attachment/upload-1" in context["content"]
+    assert "/tmp/" not in context["content"]
+    assert "server-secret" not in context["content"]
 
 
 # ---------------------------------------------------------------------------

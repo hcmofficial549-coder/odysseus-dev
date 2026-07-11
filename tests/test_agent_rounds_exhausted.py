@@ -9,7 +9,7 @@ return, or moves the done-break, could silently flip this. See PR #1999 / #1997.
 import asyncio
 import json
 
-import src.agent_loop as al
+from src.agent_loop import _loop as al
 
 
 def _collect(gen):
@@ -68,3 +68,48 @@ def test_no_rounds_exhausted_on_normal_finish(monkeypatch):
     # A plain answer (no tool block) -> done-break on round 1 -> no event.
     events = _run_loop(monkeypatch, "All done, here is your answer.", max_rounds=2)
     assert not any(e.get("type") == "rounds_exhausted" for e in events), events
+
+
+def test_zero_max_rounds_means_unlimited(monkeypatch):
+    _patch_common(monkeypatch)
+    calls = {"n": 0}
+
+    async def _fake_stream(_candidates, messages, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            yield f'data: {json.dumps({"delta": "```bash\necho hi\n```"})}\n\n'
+        else:
+            yield f'data: {json.dumps({"delta": "Done."})}\n\n'
+        yield "data: [DONE]\n\n"
+
+    monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
+    gen = al.stream_agent_loop(
+        "http://x/v1", "m",
+        [{"role": "user", "content": "do a two-step task"}],
+        max_rounds=0,
+        relevant_tools={"bash"},
+    )
+    events = _types(_collect(gen))
+    assert calls["n"] == 2
+    assert not any(e.get("type") == "rounds_exhausted" for e in events), events
+
+
+def test_emits_intent_nudge_exhausted_when_cap_is_exhausted(monkeypatch):
+    _patch_common(monkeypatch)
+
+    events = _run_loop(monkeypatch, "Let me check the logs", max_rounds=5)
+
+    guard = next((e for e in events if e.get("type") == "intent_nudge_exhausted"), None)
+    assert guard is not None, events
+    assert guard["reason"] == "intent_without_action_nudge_cap"
+    assert guard["nudges"] == 2
+
+
+def test_emits_loop_breaker_triggered_when_loop_breaker_trips(monkeypatch):
+    _patch_common(monkeypatch)
+
+    events = _run_loop(monkeypatch, "```bash\necho hi\n```", max_rounds=6)
+
+    guard = next((e for e in events if e.get("type") == "loop_breaker_triggered"), None)
+    assert guard is not None, events
+    assert guard["reason"] == "loop_breaker_stall"

@@ -300,6 +300,8 @@ if AUTH_ENABLED:
     def _token_cache_invalidate():
         nonlocal_dict = app.state.__dict__
         nonlocal_dict["_token_cache_dirty"] = True
+    from src.api_token_cache import register_token_cache_invalidator
+    register_token_cache_invalidator(_token_cache_invalidate)
     app.state.invalidate_token_cache = _token_cache_invalidate
     app.state._token_cache = _token_cache
     app.state._token_cache_dirty = True
@@ -527,6 +529,8 @@ async def serve_generated_image(filename: str, request: Request):
         "webp": "image/webp", "gif": "image/gif",
         "mp4": "video/mp4", "mov": "video/quicktime", "webm": "video/webm",
         "mkv": "video/x-matroska", "m4v": "video/mp4",
+        "mp3": "audio/mpeg", "wav": "audio/wav", "ogg": "audio/ogg",
+        "m4a": "audio/mp4", "flac": "audio/flac", "aac": "audio/aac",
     }.get(ext, "application/octet-stream")
     # Generated-image filenames are content hashes → the bytes for a given
     # filename never change. Cache them hard so the gallery doesn't
@@ -655,7 +659,12 @@ app.include_router(setup_emoji_routes())
 # Sessions
 from routes.session_routes import setup_session_routes
 session_config = {"REQUEST_TIMEOUT": REQUEST_TIMEOUT, "OPENAI_API_KEY": OPENAI_API_KEY, "SESSIONS_FILE": SESSIONS_FILE}
-app.include_router(setup_session_routes(session_manager, session_config, webhook_manager=webhook_manager))
+app.include_router(setup_session_routes(
+    session_manager,
+    session_config,
+    webhook_manager=webhook_manager,
+    upload_handler=upload_handler,
+))
 
 # Admin Danger Zone wipes (Settings → System → Danger Zone)
 from routes.admin_wipe_routes import setup_admin_wipe_routes
@@ -669,7 +678,7 @@ from routes.skills_routes import setup_skills_routes
 app.include_router(setup_skills_routes(skills_manager))
 
 # Chat
-from routes.chat_routes import setup_chat_routes
+from routes.chat import setup_chat_routes
 app.include_router(setup_chat_routes(
     session_manager, chat_handler, chat_processor,
     memory_manager, research_handler, upload_handler,
@@ -684,7 +693,7 @@ app.include_router(setup_research_routes(research_handler, session_manager=sessi
 
 # History
 from routes.history.history_routes import setup_history_routes
-app.include_router(setup_history_routes(session_manager))
+app.include_router(setup_history_routes(session_manager, upload_handler=upload_handler))
 
 # Search
 from routes.search_routes import setup_search_routes
@@ -711,14 +720,14 @@ from routes.embedding_routes import setup_embedding_routes
 app.include_router(setup_embedding_routes())
 
 # Models
-from routes.model_routes import setup_model_routes
+from routes.model import setup_model_routes
 app.include_router(setup_model_routes(model_discovery))
 
 # GitHub Copilot device-flow login
 from routes.copilot_routes import setup_copilot_routes
 app.include_router(setup_copilot_routes())
 
-# ChatGPT Subscription device-flow login
+# Codex Subscription device-flow login
 from routes.chatgpt_subscription_routes import setup_chatgpt_subscription_routes
 app.include_router(setup_chatgpt_subscription_routes())
 
@@ -763,7 +772,7 @@ app.include_router(setup_assistant_routes(task_scheduler))
 
 # Calendar (CalDAV)
 from routes.calendar_routes import setup_calendar_routes
-calendar_router = setup_calendar_routes()
+calendar_router = setup_calendar_routes(upload_handler=upload_handler)
 app.include_router(calendar_router)
 
 # Shell (user-facing command execution)
@@ -771,7 +780,7 @@ from routes.shell_routes import setup_shell_routes
 app.include_router(setup_shell_routes())
 
 # Cookbook (model download/serve/cache, cookbook state sync)
-from routes.cookbook_routes import setup_cookbook_routes
+from routes.cookbook import setup_cookbook_routes
 app.include_router(setup_cookbook_routes())
 
 from routes.workspace_routes import setup_workspace_routes
@@ -826,10 +835,10 @@ logger.info("Webhook & API token routes initialized")
 
 # Notes (Google Keep-style notes/todos)
 from routes.note_routes import setup_note_routes
-app.include_router(setup_note_routes(task_scheduler))
+app.include_router(setup_note_routes(task_scheduler, upload_handler=upload_handler))
 
 # Email
-from routes.email_routes import setup_email_routes
+from routes.email import setup_email_routes
 email_router = setup_email_routes()
 app.include_router(email_router)
 

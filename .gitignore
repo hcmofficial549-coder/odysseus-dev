@@ -8,6 +8,7 @@ build/
 !static/js/editor/build/
 venv/
 .venv/
+.image-venv/
 *.egg
 
 # Environment
@@ -26,6 +27,7 @@ secrets.env.*
 
 # Data — all user data stays local
 data/
+models/
 !services/hwfit/data/
 !services/hwfit/data/hf_models.json
 logs/
@@ -44,6 +46,7 @@ services/data/
 .claude/
 .vscode/
 .idea/
+.gradle/
 *.swp
 *.swo
 *~
@@ -99,6 +102,15 @@ docs/windows-port/
 
 # Local config
 compound.config.json
+local.properties
+android/keystore.properties
+android/*.jks
+android/*.keystore
+android/*.p12
+*.jks
+*.keystore
+*.p12
+!android/keystore.properties.example
 *.error.log
 _scratch/
 /odysseus/

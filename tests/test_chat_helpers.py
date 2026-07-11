@@ -1,6 +1,9 @@
 import asyncio
+import json
 import os
 import shutil
+import threading
+import time
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
@@ -10,17 +13,19 @@ from fastapi import HTTPException
 
 import routes.chat_helpers as chat_helpers
 from routes.chat_helpers import (
-    _enforce_chat_privileges,
     _session_is_research_spinoff,
-    auto_name_session,
     build_chat_context,
     build_uploaded_file_manifest,
+    _enforce_chat_privileges,
+    _derive_session_title_from_text,
+    auto_name_session,
     clean_thinking_for_save,
     needs_auto_name,
     PreprocessedMessage,
     PresetInfo,
     save_assistant_response,
 )
+from src.upload_handler import UploadHandler
 
 
 class _AuthManager:
@@ -164,12 +169,33 @@ class _ManifestUploadHandler:
         except ValueError:
             return False
 
-    def resolve_upload(self, upload_id, owner=None):
-        self.calls.append((upload_id, owner))
+    def resolve_upload(self, upload_id, owner=None, allow_admin=True):
+        self.calls.append((upload_id, owner, allow_admin))
         row = self.rows.get(upload_id)
         if isinstance(row, dict) and row.get("owner") and row.get("owner") != owner:
             return None
         return row
+
+    def resolve_uploads(
+        self,
+        upload_ids,
+        owner=None,
+        allow_admin=True,
+        limit=None,
+    ):
+        resolved = []
+        for upload_id in upload_ids:
+            row = self.resolve_upload(
+                upload_id,
+                owner=owner,
+                allow_admin=allow_admin,
+            )
+            if not isinstance(row, dict):
+                continue
+            resolved.append(row)
+            if limit is not None and len(resolved) >= limit:
+                break
+        return resolved
 
 
 def _manifest_test_dir(name):
@@ -178,7 +204,7 @@ def _manifest_test_dir(name):
     return root
 
 
-def test_build_uploaded_file_manifest_filters_and_nulls_unreadable_paths(monkeypatch):
+def test_build_uploaded_file_manifest_filters_owner_and_omits_host_paths(monkeypatch):
     root = _manifest_test_dir("manifest")
     try:
         upload_dir = root / "uploads"
@@ -199,7 +225,7 @@ def test_build_uploaded_file_manifest_filters_and_nulls_unreadable_paths(monkeyp
         handler = _ManifestUploadHandler(upload_dir, {
             "good": {
                 "id": "good",
-                "name": "good.txt",
+                "name": "C:\\server-secret\\good.txt",
                 "mime": "text/plain",
                 "size": 5,
                 "path": str(good),
@@ -233,21 +259,26 @@ def test_build_uploaded_file_manifest_filters_and_nulls_unreadable_paths(monkeyp
         )
 
         assert [item["id"] for item in manifest] == ["good", "outside", "missing"]
+        assert manifest[0]["type"] == "attachment_ref"
+        assert manifest[0]["attachment_id"] == "good"
+        assert manifest[0]["name"] == "good.txt"
+        assert manifest[0]["uri"] == "odysseus://attachment/good"
+        assert manifest[0]["read_policy"] == "owner_checked_upload"
         assert os.path.realpath(manifest[0]["path"]) == os.path.realpath(good)
         assert manifest[1]["path"] is None
         assert manifest[2]["path"] is None
         assert handler.calls == [
-            ("good", "alice"),
-            ("bob", "alice"),
-            ("outside", "alice"),
-            ("missing", "alice"),
-            ("bad", "alice"),
+            ("good", "alice", False),
+            ("bob", "alice", False),
+            ("outside", "alice", False),
+            ("missing", "alice", False),
+            ("bad", "alice", False),
         ]
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
 
-def test_build_uploaded_file_manifest_hides_paths_read_file_cannot_open(monkeypatch):
+def test_build_uploaded_file_manifest_never_consults_filesystem_tool_roots(monkeypatch):
     root = _manifest_test_dir("manifest-unreadable")
     try:
         upload_dir = root / "uploads"
@@ -265,9 +296,148 @@ def test_build_uploaded_file_manifest_hides_paths_read_file_cannot_open(monkeypa
 
         manifest = build_uploaded_file_manifest(["upload"], handler, owner="alice")
 
+        assert manifest[0]["uri"] == "odysseus://attachment/upload"
         assert manifest[0]["path"] is None
     finally:
         shutil.rmtree(root, ignore_errors=True)
+
+
+def test_build_uploaded_file_manifest_limit_counts_only_authorized_entries(
+    tmp_path,
+    monkeypatch,
+):
+    upload_dir = tmp_path / "uploads"
+    upload_dir.mkdir()
+    readable = upload_dir / "readable.txt"
+    readable.write_text("hello", encoding="utf-8")
+    handler = _ManifestUploadHandler(upload_dir, {
+        "bob-first": {
+            "id": "bob-first",
+            "name": "bob.txt",
+            "path": str(readable),
+            "owner": "bob",
+        },
+        "alice-first": {
+            "id": "alice-first",
+            "name": "alice.txt",
+            "path": str(readable),
+            "owner": "alice",
+        },
+        "alice-second": {
+            "id": "alice-second",
+            "name": "alice-2.txt",
+            "path": str(readable),
+            "owner": "alice",
+        },
+    })
+
+    import src.settings as settings
+
+    monkeypatch.setattr(
+        settings,
+        "get_setting",
+        lambda key: [str(upload_dir)] if key == "tool_path_extra_roots" else None,
+    )
+    manifest = build_uploaded_file_manifest(
+        ["bob-first", "alice-first", "alice-second"],
+        handler,
+        owner="alice",
+        limit=1,
+    )
+
+    assert [item["id"] for item in manifest] == ["alice-first"]
+    assert handler.calls == [
+        ("bob-first", "alice", False),
+        ("alice-first", "alice", False),
+    ]
+
+    handler.calls.clear()
+    bounded = build_uploaded_file_manifest(
+        ["bob-first", "alice-first"],
+        handler,
+        owner="alice",
+        limit=1,
+        attempt_limit=1,
+    )
+    assert bounded == []
+    assert handler.calls == [("bob-first", "alice", False)]
+
+
+def test_build_uploaded_file_manifest_batches_stale_lifecycle_updates(
+    tmp_path,
+    monkeypatch,
+):
+    upload_dir = tmp_path / "uploads"
+    dated_dir = upload_dir / "2000" / "01" / "01"
+    dated_dir.mkdir(parents=True)
+    handler = UploadHandler(str(tmp_path), str(upload_dir))
+    old_timestamp = "2000-01-01T00:00:00"
+    upload_ids = []
+    index = {}
+    for number in range(1, 21):
+        upload_id = f"{number:032x}.txt"
+        checksum = f"{number:064x}"
+        path = dated_dir / upload_id
+        path.write_text(f"historical attachment {number}", encoding="utf-8")
+        upload_ids.append(upload_id)
+        index[f"alice:{checksum}"] = {
+            "id": upload_id,
+            "path": str(path),
+            "name": path.name,
+            "original_name": path.name,
+            "mime": "text/plain",
+            "size": path.stat().st_size,
+            "hash": checksum,
+            "checksum_sha256": checksum,
+            "owner": "alice",
+            "uploaded_at": old_timestamp,
+            "created_at": old_timestamp,
+            "last_accessed": old_timestamp,
+        }
+
+    index_path = upload_dir / "uploads.json"
+    index_path.write_text(json.dumps(index), encoding="utf-8")
+    handler._index_cache = None
+    writes = []
+    real_atomic_write = handler._atomic_write_json
+
+    def record_atomic_write(path, data, *, sync_backup=False):
+        if os.path.normcase(os.path.realpath(path)) == os.path.normcase(
+            os.path.realpath(index_path)
+        ):
+            writes.append(sync_backup)
+        return real_atomic_write(path, data, sync_backup=sync_backup)
+
+    monkeypatch.setattr(handler, "_atomic_write_json", record_atomic_write)
+
+    manifest = build_uploaded_file_manifest(
+        upload_ids,
+        handler,
+        owner="alice",
+        limit=20,
+        attempt_limit=100,
+    )
+
+    assert [item["id"] for item in manifest] == upload_ids
+    assert writes == [True]
+    live_index = json.loads(index_path.read_text(encoding="utf-8"))
+    backup_index = json.loads(
+        (upload_dir / "uploads.json.bak").read_text(encoding="utf-8")
+    )
+    assert live_index == backup_index
+    refreshed_at = {row["last_accessed"] for row in live_index.values()}
+    assert old_timestamp not in refreshed_at
+    assert len(refreshed_at) == 1
+
+    second_manifest = build_uploaded_file_manifest(
+        upload_ids,
+        handler,
+        owner="alice",
+        limit=20,
+        attempt_limit=100,
+    )
+    assert [item["id"] for item in second_manifest] == upload_ids
+    assert writes == [True]
 
 
 @pytest.mark.parametrize("name,expected", [
@@ -295,6 +465,50 @@ def test_build_uploaded_file_manifest_hides_paths_read_file_cannot_open(monkeypa
 ])
 def test_needs_auto_name(name, expected):
     assert needs_auto_name(name) == expected, f"needs_auto_name({name!r}) should be {expected}"
+
+
+def test_derive_session_title_from_text_is_local_and_short():
+    assert (
+        _derive_session_title_from_text(
+            "Can you debug why LMS runs two prompt processing tries after the reply?"
+        )
+        == "Debug Why LMS Runs Two Prompt"
+    )
+
+
+@pytest.mark.asyncio
+async def test_auto_name_session_does_not_call_llm(monkeypatch):
+    async def fail_llm_call(*args, **kwargs):
+        raise AssertionError("auto-name should not spend an LLM request")
+
+    monkeypatch.setattr("src.llm_core.llm_call_async", fail_llm_call)
+
+    sess = type("Session", (), {})()
+    sess.id = "sess-local-title"
+    sess.history = [
+        type(
+            "Msg",
+            (),
+            {
+                "role": "user",
+                "content": "Can you debug why LMS runs two prompt processing tries after the reply?",
+            },
+        )()
+    ]
+
+    updated = {}
+    session_manager = type(
+        "SessionManager",
+        (),
+        {"update_session_name": lambda self, sid, name: updated.update({"sid": sid, "name": name})},
+    )()
+
+    await auto_name_session(session_manager, sess)
+
+    assert updated == {
+        "sid": "sess-local-title",
+        "name": "Debug Why LMS Runs Two Prompt",
+    }
 
 
 def test_clean_thinking_for_save_extracts_gemma4_thought_channel():
@@ -368,28 +582,18 @@ def test_spinoff_detected_from_chatmessage_history():
     assert _session_is_research_spinoff(sess) is True
 
 
-def test_auto_name_session_passes_session_fallback_to_task_resolver(monkeypatch):
+def test_auto_name_session_uses_local_message_not_task_resolver(monkeypatch):
     import src.llm_core as llm_core
     import src.task_endpoint as task_endpoint
 
-    resolver_calls = []
-    llm_calls = []
+    def fail_resolve_task_endpoint(*args, **kwargs):
+        raise AssertionError("auto-name should not resolve a task endpoint")
 
-    def fake_resolve_task_endpoint(
-        fallback_url=None,
-        fallback_model=None,
-        fallback_headers=None,
-        owner=None,
-    ):
-        resolver_calls.append((fallback_url, fallback_model, fallback_headers, owner))
-        return fallback_url, fallback_model, fallback_headers
+    async def fail_llm_call(*args, **kwargs):
+        raise AssertionError("auto-name should not spend an LLM request")
 
-    async def fake_llm_call(url, model, messages, **kwargs):
-        llm_calls.append((url, model, messages, kwargs))
-        return "Focused Fix"
-
-    monkeypatch.setattr(task_endpoint, "resolve_task_endpoint", fake_resolve_task_endpoint)
-    monkeypatch.setattr(llm_core, "llm_call_async", fake_llm_call)
+    monkeypatch.setattr(task_endpoint, "resolve_task_endpoint", fail_resolve_task_endpoint)
+    monkeypatch.setattr(llm_core, "llm_call_async", fail_llm_call)
 
     session_headers = {"Authorization": "Bearer session"}
     sess = SimpleNamespace(
@@ -407,16 +611,7 @@ def test_auto_name_session_passes_session_fallback_to_task_resolver(monkeypatch)
 
     asyncio.run(auto_name_session(session_manager, sess))
 
-    assert resolver_calls == [(
-        "http://session.example/v1/chat/completions",
-        "session-model",
-        session_headers,
-        "alice",
-    )]
-    assert llm_calls[0][0] == "http://session.example/v1/chat/completions"
-    assert llm_calls[0][1] == "session-model"
-    assert llm_calls[0][3]["headers"] == session_headers
-    assert updates == [("session-1", "Focused Fix")]
+    assert updates == [("session-1", "Fix the Endpoint Fallback Bug")]
 
 
 def test_spinoff_detected_from_dict_history():
@@ -445,7 +640,15 @@ def test_empty_or_missing_history():
     assert _session_is_research_spinoff(SimpleNamespace()) is False
 
 
-async def _build_context_owner_probe(monkeypatch, request_state):
+async def _build_context_owner_probe(
+    monkeypatch,
+    request_state,
+    *,
+    history=None,
+    upload_handler=None,
+    agent_mode=False,
+    att_ids=None,
+):
     captured = {
         "prefs_owner": None,
         "preface_owner": None,
@@ -506,8 +709,9 @@ async def _build_context_owner_probe(monkeypatch, request_state):
         endpoint_url="http://model.local/v1/chat/completions",
         model="test-model",
         headers={},
-        history=[],
+        history=list(history or []),
         messages=[],
+        owner=request_state.get("api_token_owner") or request_state.get("current_user"),
     )
     sess.get_context_messages = lambda: list(sess.messages)
 
@@ -515,11 +719,13 @@ async def _build_context_owner_probe(monkeypatch, request_state):
     ctx = await build_chat_context(
         sess=sess,
         request=request,
-        chat_handler=SimpleNamespace(),
+        chat_handler=SimpleNamespace(upload_handler=upload_handler),
         chat_processor=SimpleNamespace(build_context_preface=fake_build_context_preface),
         message="hello",
         session_id="session-1",
+        att_ids=att_ids,
         incognito=True,
+        agent_mode=agent_mode,
     )
 
     return ctx, captured
@@ -560,3 +766,203 @@ async def test_build_chat_context_keeps_cookie_user_owner_scope(monkeypatch):
         "preface_owner": "bob",
         "compact_owner": "bob",
     }
+
+
+@pytest.mark.asyncio
+async def test_build_chat_context_restores_owner_checked_historical_uploads(
+    tmp_path,
+    monkeypatch,
+):
+    upload_dir = tmp_path / "uploads"
+    upload_dir.mkdir()
+    alice_path = upload_dir / "alice-history.txt"
+    alice_path.write_text("alice historical upload", encoding="utf-8")
+    handler = _ManifestUploadHandler(upload_dir, {
+        "current-only": {
+            "id": "current-only",
+            "name": "current.txt",
+            "mime": "text/plain",
+            "size": alice_path.stat().st_size,
+            "path": str(alice_path),
+            "owner": "alice",
+        },
+        "shared": {
+            "id": "shared",
+            "name": "shared.txt",
+            "mime": "text/plain",
+            "size": alice_path.stat().st_size,
+            "path": str(alice_path),
+            "owner": "alice",
+        },
+        "recent-history": {
+            "id": "recent-history",
+            "name": "recent-history.txt",
+            "mime": "text/plain",
+            "size": alice_path.stat().st_size,
+            "path": str(alice_path),
+            "owner": "alice",
+        },
+        "alice-history": {
+            "id": "alice-history",
+            "name": "alice-history.txt",
+            "mime": "text/plain",
+            "size": alice_path.stat().st_size,
+            "path": str(alice_path),
+            "owner": "alice",
+        },
+        "bob-history": {
+            "id": "bob-history",
+            "name": "bob-history.txt",
+            "mime": "text/plain",
+            "size": 3,
+            "path": str(alice_path),
+            "owner": "bob",
+        },
+    })
+    history = [
+        SimpleNamespace(metadata={
+            "attachments": [
+                {"id": "alice-history", "name": "alice-history.txt"},
+                {"id": "shared", "name": "shared.txt"},
+            ]
+        }),
+        SimpleNamespace(metadata={
+            "attachments": [
+                {"id": "recent-history", "name": "recent-history.txt"},
+                {"id": "bob-history", "name": "bob-history.txt"},
+            ]
+        }),
+    ]
+
+    import src.settings as settings
+
+    monkeypatch.setattr(
+        settings,
+        "get_setting",
+        lambda key: [str(upload_dir)] if key == "tool_path_extra_roots" else None,
+    )
+    ctx, _captured = await _build_context_owner_probe(
+        monkeypatch,
+        {"api_token": False, "current_user": "alice"},
+        history=history,
+        upload_handler=handler,
+        agent_mode=True,
+        att_ids=["current-only", "shared"],
+    )
+
+    assert [item["id"] for item in ctx.uploaded_files] == [
+        "current-only",
+        "shared",
+        "recent-history",
+        "alice-history",
+    ]
+    assert ctx.uploaded_files[0]["read_policy"] == "owner_checked_upload"
+    assert ctx.uploaded_files[0]["uri"] == "odysseus://attachment/current-only"
+    assert all(item["path"] is not None for item in ctx.uploaded_files)
+    assert handler.calls == [
+        ("current-only", "alice", False),
+        ("shared", "alice", False),
+        ("recent-history", "alice", False),
+        ("bob-history", "alice", False),
+        ("alice-history", "alice", False),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_historical_manifest_resolution_keeps_event_loop_responsive(
+    tmp_path,
+    monkeypatch,
+):
+    upload_dir = tmp_path / "uploads"
+    upload_dir.mkdir()
+    readable = upload_dir / "historical.txt"
+    readable.write_text("historical attachment", encoding="utf-8")
+    upload_ids = [f"history-{number}" for number in range(20)]
+    rows = {
+        upload_id: {
+            "id": upload_id,
+            "name": f"{upload_id}.txt",
+            "mime": "text/plain",
+            "size": readable.stat().st_size,
+            "path": str(readable),
+            "owner": "alice",
+        }
+        for upload_id in upload_ids
+    }
+
+    class _BlockingManifestUploadHandler(_ManifestUploadHandler):
+        def __init__(self, upload_dir, rows):
+            super().__init__(upload_dir, rows)
+            self.started = threading.Event()
+            self.release = threading.Event()
+            self.completed = threading.Event()
+            self.released_by_heartbeat = False
+            self.resolver_thread_ids = []
+
+        def resolve_uploads(
+            self,
+            candidates,
+            owner=None,
+            allow_admin=True,
+            limit=None,
+        ):
+            resolved = []
+            try:
+                self.started.set()
+                self.released_by_heartbeat = self.release.wait(1)
+                for upload_id in candidates:
+                    self.resolver_thread_ids.append(threading.get_ident())
+                    time.sleep(0.005)
+                    row = self.resolve_upload(
+                        upload_id,
+                        owner=owner,
+                        allow_admin=allow_admin,
+                    )
+                    if not isinstance(row, dict):
+                        continue
+                    resolved.append(row)
+                    if limit is not None and len(resolved) >= limit:
+                        break
+                return resolved
+            finally:
+                self.completed.set()
+
+    handler = _BlockingManifestUploadHandler(upload_dir, rows)
+    history = [SimpleNamespace(metadata={
+        "attachments": [{"id": upload_id} for upload_id in upload_ids]
+    })]
+    event_loop_thread_id = threading.get_ident()
+    heartbeat_ticks = 0
+
+    async def heartbeat():
+        nonlocal heartbeat_ticks
+        while not handler.started.is_set():
+            await asyncio.sleep(0)
+        heartbeat_ticks += 1
+        handler.release.set()
+        while not handler.completed.is_set():
+            heartbeat_ticks += 1
+            await asyncio.sleep(0.001)
+
+    heartbeat_task = asyncio.create_task(heartbeat())
+    ctx, _captured = await _build_context_owner_probe(
+        monkeypatch,
+        {"api_token": False, "current_user": "alice"},
+        history=history,
+        upload_handler=handler,
+        agent_mode=True,
+    )
+    await heartbeat_task
+
+    assert [item["id"] for item in ctx.uploaded_files] == upload_ids
+    assert handler.released_by_heartbeat is True
+    assert heartbeat_ticks >= 5
+    assert handler.resolver_thread_ids
+    assert all(
+        thread_id != event_loop_thread_id
+        for thread_id in handler.resolver_thread_ids
+    )
+    assert handler.calls == [
+        (upload_id, "alice", False)
+        for upload_id in upload_ids
+    ]

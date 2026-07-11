@@ -27,6 +27,16 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
   const RESEARCH_TIMEOUT_MS = 360000;
   const DEFAULT_TIMEOUT_MS = 120000;
   const RESEARCH_SVG = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>';
+  const WORKSPACE_LOCAL_PATH_RE = /(?:[A-Za-z]:[\\/][^\s`'"<>]+|(?:\.{1,2}[\\/]|~[\\/]|\/)[^\s`'"<>]+|(?:[\w.-]+[\\/])+[^\s`'"<>]+|\b[\w.-]+\.(?:py|pyw|js|mjs|cjs|ts|tsx|jsx|java|kt|kts|xml|json|jsonc|toml|ya?ml|txt|md|css|scss|html?|gradle|properties|lock|sh|bash|ps1|bat|cmd|sql|rs|go|c|cc|cpp|h|hpp|cs|rb|php|lua)\b)/i;
+  const WORKSPACE_FILE_ACTION_RE = /\b(?:open|read|show|list|browse|inspect|check|search|find|edit|modify|change|write|save|create|delete|remove|rename|move|fix|update|patch|refactor|build|run|test|look\s+(?:at|in|through)|work\s+on)\b/i;
+  const WORKSPACE_FILE_TARGET_RE = /\b(?:files?|folders?|director(?:y|ies)|repo|repository|project|workspace|codebase|source|tree|path)\b/i;
+
+  function _looksLikeWorkspaceFileRequest(text) {
+    const value = String(text || '');
+    if (!value.trim()) return false;
+    if (WORKSPACE_LOCAL_PATH_RE.test(value)) return true;
+    return WORKSPACE_FILE_ACTION_RE.test(value) && WORKSPACE_FILE_TARGET_RE.test(value);
+  }
 
   let API_BASE = '';
   let currentAbort = null;
@@ -283,8 +293,9 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
   // Browser notifications now in chatStream.js
   var _notifyResearchComplete = chatStream.notifyResearchComplete;
 
-  // Model/image pricing, _buildImageBubble now in chatRenderer.js
+  // Model/image pricing, media bubble rendering now in chatRenderer.js
   var _buildImageBubble = chatRenderer.buildImageBubble;
+  var _buildMediaBubble = chatRenderer.buildMediaBubble || chatRenderer.buildImageBubble;
   var getModelCost = chatRenderer.getModelCost;
   var getImageCost = chatRenderer.getImageCost;
 
@@ -1199,12 +1210,16 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       // on; explicit web/current-info requests are handled by the backend
       // intent gate.
       const toggleState = Storage.loadToggleState();
+      const _ws = (Storage.KEYS && Storage.get(Storage.KEYS.WORKSPACE, '')) || '';
       let isAgentMode = (toggleState.mode || 'chat') === 'agent';
       const incognitoChk = el('incognito-toggle');
       const isIncognito = !!(incognitoChk && incognitoChk.checked);
       // Auto-escalate to agent mode when a document is open — the user expects
       // the AI to see the document and have tools to edit it
       if (!isIncognito && !isAgentMode && documentModule && activeDocIdForSend) {
+        isAgentMode = true;
+      }
+      if (!isAgentMode && _ws && _looksLikeWorkspaceFileRequest(_finalMsgWithInject)) {
         isAgentMode = true;
       }
       fd.append('mode', isAgentMode ? 'agent' : 'chat');
@@ -1229,7 +1244,6 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       if (isIncognito) {
         fd.append('incognito', 'true');
       }
-      const _ws = (Storage.KEYS && Storage.get(Storage.KEYS.WORKSPACE, '')) || '';
       if (_ws) {
         fd.append('workspace', _ws);
       }
@@ -1243,7 +1257,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       currentAbort = abortCtrl;
 
       const _tState = Storage.loadToggleState();
-      const _isAgent = (_tState.mode || 'chat') === 'agent';
+      const _isAgent = String(fd.get('mode') || '').toLowerCase() === 'agent';
 
       // Timeout: 6 min for research and agent mode, 3 min otherwise
       const timeoutMs = el('research-toggle').checked || _isAgent ? RESEARCH_TIMEOUT_MS : DEFAULT_TIMEOUT_MS;
@@ -1501,6 +1515,9 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
         'list_files': 'Browsing',
         'image_gen': 'Generating',
         'generate_image': 'Generating',
+        'generate_video': 'Generating video',
+        'generate_music': 'Generating music',
+        'runcomfy_media': 'Generating media',
         'manage_memory': 'Remembering',
         'save_memory': 'Remembering',
         'search_memory': 'Recalling',
@@ -1532,7 +1549,9 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
         const _thinkBody = document.createElement('div');
         _thinkBody.className = 'body';
         const _ts = spinnerModule.create(label || 'Thinking', 'right', 'wave');
-        _thinkBody.appendChild(_ts.createElement());
+        const _spinnerEl = _ts.createElement();
+        _spinnerEl.setAttribute('aria-label', label || 'Thinking');
+        _thinkBody.appendChild(_spinnerEl);
         _ts.start(120);
         _thinkMsg._spinner = _ts;
         _thinkMsg.appendChild(_thinkBody);
@@ -1822,7 +1841,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 typewriterInto(roundHolder.querySelector('.body'), errMsg);
                 break;
               }
-              if (json.delta || json.type === 'agent_prep' || json.type === 'tool_start' || json.type === 'tool_output' || json.type === 'tool_progress' || json.type === 'agent_step' || json.type === 'doc_stream_open' || json.type === 'doc_stream_delta' || json.type === 'research_progress') {
+              if (json.delta || json.type === 'agent_prep' || json.type === 'tool_start' || json.type === 'tool_output' || json.type === 'tool_progress' || json.type === 'agent_step' || json.type === 'loop_breaker_triggered' || json.type === 'intent_nudge_exhausted' || json.type === 'doc_stream_open' || json.type === 'doc_stream_delta' || json.type === 'research_progress') {
                 clearResponseTimeout();
                 clearProcessingProbe();
                 clearFirstTokenWaitTimers();
@@ -1945,7 +1964,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                   if (_thinkLen < 20) {
                     const _afterClose = normalizedRoundText.replace(/<(?:think(?:ing)?|thought)(?:\s+[^>]*)?>([\s\S]*?)<\/(?:think(?:ing)?|thought)>/i, '').trim();
                     // Only keep waiting if there's trailing text that looks like thinking (not tool calls)
-                    const _hasToolCall = /```(?:bash|python|web_search|read_file|write_file|create_document|edit_document|manage_|generate_image)/i.test(_afterClose);
+                    const _hasToolCall = /```(?:bash|python|web_search|read_file|write_file|create_document|edit_document|manage_|generate_image|generate_video|generate_music|runcomfy_media)/i.test(_afterClose);
                     const _hasOrphanClose = /<\/(?:think(?:ing)?|thought)>/i.test(_afterClose);
                     if (!_hasToolCall && (_hasOrphanClose || (Date.now() - thinkingStartTime) < 500)) {
                       hasUnclosedThink = true; // keep waiting for real </think>
@@ -2664,13 +2683,25 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                   _lastToolName = '';
                   uiModule.scrollHistory();
                 }
-                // --- Render generated images inline ---
-                if (json.image_url) {
+                // --- Render generated media inline ---
+                const _mediaUrl = json.media_url || json.image_url;
+                if (_mediaUrl) {
+                  const _mediaType = json.media_type || (json.image_url ? 'image' : '');
                   const chatBox = document.getElementById('chat-history');
-                  chatBox.appendChild(_buildImageBubble(json.image_url, json.image_prompt, json.image_model, json.image_size, json.image_quality, json.image_id));
+                  chatBox.appendChild(_buildMediaBubble(
+                    _mediaUrl,
+                    json.media_prompt || json.image_prompt,
+                    json.media_model || json.image_model,
+                    json.media_size || json.image_size,
+                    json.media_quality || json.image_quality,
+                    json.media_id || json.image_id,
+                    _mediaType
+                  ));
                   uiModule.scrollHistory();
                   // Notify gallery to refresh if open
-                  window.dispatchEvent(new CustomEvent('gallery-refresh'));
+                  if (_mediaType !== 'audio' && _mediaType !== 'music') {
+                    window.dispatchEvent(new CustomEvent('gallery-refresh'));
+                  }
                 }
                 // --- Render browser screenshots in tool output ---
                 if (json.screenshot && currentToolBubble) {
@@ -2851,6 +2882,22 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 budgetDiv.textContent = `Tool budget reached (${json.used}/${json.limit} calls). Agent stopped.`;
                 const chatBox = document.getElementById('chat-history');
                 chatBox.appendChild(budgetDiv);
+
+              } else if (json.type === 'loop_breaker_triggered' || json.type === 'intent_nudge_exhausted') {
+                if (_isBg) continue;
+                _cancelThinkingTimer();
+                _removeThinkingSpinner();
+                const guardDiv = document.createElement('div');
+                guardDiv.className = 'stopped-indicator';
+                const guardLabel = document.createElement('span');
+                guardLabel.textContent = `[Agent guard: ${json.message || json.reason || 'internal stop'}]`;
+                guardDiv.appendChild(guardLabel);
+                const targetBody = roundHolder && roundHolder.querySelector('.body');
+                if (targetBody) targetBody.appendChild(guardDiv);
+                else {
+                  const chatBox = document.getElementById('chat-history');
+                  if (chatBox) chatBox.appendChild(guardDiv);
+                }
 
               } else if (json.type === 'teacher_takeover') {
                 if (_isBg) continue;

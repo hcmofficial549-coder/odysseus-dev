@@ -592,7 +592,7 @@ function _initModelPickerDropdown() {
         }
         const sessions = _deps.getSessions();
         const s = sessions.find(x => x.id === currentSessionId);
-        if (s) { s.model = m.mid; s.endpoint_url = m.url; }
+        if (s) { s.model = m.mid; s.endpoint_url = m.url; s.endpoint_id = m.endpointId || ''; }
         // Header stays as session name — model info shown in picker only
       } catch (e) {
         uiModule.showError('Failed to set model: ' + e);
@@ -773,15 +773,26 @@ export function updateModelPicker() {
       }
     }
   }
-  const latestPending = _deps.getPendingChat && _deps.getPendingChat();
-  if (
-    !currentSessionId &&
-    !_autoSelectingDefault &&
-    window.modelsModule &&
-    window.modelsModule.getCachedItems &&
-    (!modelId || (latestPending && latestPending.source === 'fallback'))
-  ) {
-    _ensureDefaultPendingChat();
+  if (!modelId && !_autoSelectingDefault && window.modelsModule && window.modelsModule.getCachedItems) {
+    const items = window.modelsModule.getCachedItems();
+    const first = items.find(item => !item.offline && ((item.models || []).length || (item.models_extra || []).length));
+    if (first) {
+      const models = (first.models || []).concat(first.models_extra || []);
+      modelId = models[0];
+      if (!currentSessionId) {
+        _deps.setPendingChat({ url: first.url, modelId, endpointId: first.endpoint_id });
+      } else {
+        if (s) { s.model = modelId; s.endpoint_url = first.url; s.endpoint_id = first.endpoint_id || ''; }
+        _autoSelectingDefault = true;
+        const fd = new FormData();
+        fd.append('model', modelId);
+        fd.append('endpoint_url', first.url || '');
+        if (first.endpoint_id) fd.append('endpoint_id', first.endpoint_id);
+        fetch(`${API_BASE}/api/session/${currentSessionId}`, { method: 'PATCH', body: fd })
+          .catch(() => {})
+          .finally(() => { _autoSelectingDefault = false; });
+      }
+    }
   }
 
   const displayName = modelId ? modelId.split('/').pop() : 'Select model';

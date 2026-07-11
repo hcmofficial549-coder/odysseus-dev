@@ -85,6 +85,8 @@ class TestProviderLabel:
         ("https://api.mistral.ai/v1", "Mistral"),
         ("https://api.deepseek.com", "DeepSeek"),
         ("https://generativelanguage.googleapis.com/v1beta/openai", "Google"),
+        ("https://dashscope.aliyuncs.com/compatible-mode/v1", "DashScope"),
+        ("https://ws-14mw4hok7d25w1hl.cn-hongkong.maas.aliyuncs.com/compatible-mode/v1", "Alibaba Model Studio"),
         ("https://api.together.xyz/v1", "Together"),
         ("https://api.together.ai/v1", "Together"),
         ("https://api.fireworks.ai/inference/v1", "Fireworks"),

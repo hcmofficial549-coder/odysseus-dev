@@ -13,9 +13,16 @@ import { bindMenuDismiss } from './escMenuStack.js';
 let initialized = false;
 let modalEl = null;
 let _authPolicy = { password_min_length: 8 };
+let _closeGen = 0;
 
 function el(id) { return document.getElementById(id); }
 function esc(s) { return uiModule.esc(s); }
+function isMobileStandaloneEmailUnsupported(d) {
+  return !!(d && (d.mobile_standalone_unsupported || d.standalone_unsupported));
+}
+function mobileStandaloneEmailMessage(d) {
+  return d?.detail || d?.error || d?.imap?.error || 'This email backend did not accept the request.';
+}
 function safeRasterDataUrl(raw) {
   const value = String(raw || '').trim();
   return /^data:image\/(?:png|jpe?g|gif|webp);base64,[a-z0-9+/=\s]+$/i.test(value) ? value : '';
@@ -63,11 +70,10 @@ function initDrag() {
 function resetWindowPlacement() {
   const content = modalEl && modalEl.querySelector('.settings-modal-content');
   if (!content) return;
-  const hadLeft = modalEl.classList.contains('modal-left-docked');
-  const hadRight = modalEl.classList.contains('modal-right-docked');
-  modalEl.classList.remove('modal-left-docked', 'modal-right-docked');
-  if (hadLeft) clearDockSide('left', modalEl);
-  if (hadRight) clearDockSide('right', modalEl);
+  const dockSides = ['left', 'right', 'top', 'bottom'];
+  const activeDockSides = dockSides.filter((side) => modalEl.classList.contains(`modal-${side}-docked`));
+  modalEl.classList.remove(...dockSides.map((side) => `modal-${side}-docked`), 'modal-full-expanded');
+  activeDockSides.forEach((side) => clearDockSide(side, modalEl));
   if (content._leftDockNavObs) {
     try { content._leftDockNavObs.navObs && content._leftDockNavObs.navObs.disconnect(); } catch (_) {}
     try { window.removeEventListener('resize', content._leftDockNavObs.reanchor); } catch (_) {}
@@ -76,12 +82,19 @@ function resetWindowPlacement() {
   delete content._preDockSnapshot;
   delete content._dockSide;
   delete content._dockSuspended;
+  delete content._fullExpandReturnState;
   delete content.dataset._tilePreSnap;
   delete content.dataset._tileZone;
   [
     'position', 'left', 'top', 'right', 'bottom', 'margin', 'transform',
-    'width', 'height', 'max-width', 'max-height', 'border-radius', 'transition',
+    'width', 'height', 'min-height', 'max-width', 'max-height', 'border-radius', 'transition',
   ].forEach(prop => content.style.removeProperty(prop));
+  const expandBtn = modalEl.querySelector('.modal-expand-btn');
+  if (expandBtn) {
+    expandBtn.classList.remove('active');
+    expandBtn.setAttribute('aria-pressed', 'false');
+    expandBtn.title = 'Full expand window';
+  }
 }
 
 /* ── Delegated link: close Settings + open the Prompt (characters) modal ── */
@@ -1682,7 +1695,7 @@ async function initAgentSettings() {
     var res = await fetch('/api/auth/settings', { credentials: 'same-origin' });
     var settings = await res.json();
     if (settings.agent_max_tool_calls) toolsInput.value = settings.agent_max_tool_calls;
-    if (roundsInput && settings.agent_max_rounds) roundsInput.value = settings.agent_max_rounds;
+    if (roundsInput && settings.agent_max_rounds != null) roundsInput.value = settings.agent_max_rounds;
     if (supInput) supInput.checked = !!settings.agent_supervisor_ladder;
   } catch (e) {}
 
@@ -1696,7 +1709,7 @@ async function initAgentSettings() {
 
   async function save() {
     var tools = clampInt(toolsInput.value, 0, 1000, 0);
-    var rounds = roundsInput ? clampInt(roundsInput.value, 1, 200, 20) : null;
+    var rounds = roundsInput ? clampInt(roundsInput.value, 0, 200, 0) : null;
     toolsInput.value = tools;                       // reflect the clamped value
     if (roundsInput) roundsInput.value = rounds;
     var payload = { agent_max_tool_calls: tools };
@@ -1708,7 +1721,7 @@ async function initAgentSettings() {
         body: JSON.stringify(payload)
       });
       msg.textContent = (tools > 0 ? 'Limit: ' + tools + ' tool calls' : 'Unlimited tool calls') +
-        (rounds != null ? ' · ' + rounds + ' steps/message' : '') +
+        (rounds != null ? ' · ' + (rounds > 0 ? rounds + ' steps/message' : 'unlimited steps/message') : '') +
         (supInput && supInput.checked ? ' · supervisor on' : '');
       msg.style.color = 'var(--fg)';
     } catch (e) { msg.textContent = 'Failed to save'; msg.style.color = 'var(--red)'; }
@@ -1718,9 +1731,9 @@ async function initAgentSettings() {
   if (roundsInput) roundsInput.addEventListener('change', save);
   if (supInput) supInput.addEventListener('change', save);
   var cur = parseInt(toolsInput.value, 10) || 0;
-  var curR = roundsInput ? (parseInt(roundsInput.value, 10) || 20) : null;
+  var curR = roundsInput ? clampInt(roundsInput.value, 0, 200, 0) : null;
   msg.textContent = (cur > 0 ? 'Limit: ' + cur + ' tool calls' : 'Unlimited tool calls') +
-    (curR != null ? ' · ' + curR + ' steps/message' : '') +
+    (curR != null ? ' · ' + (curR > 0 ? curR + ' steps/message' : 'unlimited steps/message') : '') +
     (supInput && supInput.checked ? ' · supervisor on' : '');
 
 }
@@ -2842,10 +2855,30 @@ async function initEmailAccountsSettings() {
   if (!listEl || !addBtn || !formEl) return;
 
   const esc = s => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  let mobileEmailUnsupported = false;
+  let mobileEmailUnsupportedText = '';
 
   async function fetchAccounts() {
     const r = await fetch('/api/email/accounts', { credentials: 'same-origin' });
     const d = await r.json();
+    mobileEmailUnsupported = isMobileStandaloneEmailUnsupported(d);
+    mobileEmailUnsupportedText = mobileEmailUnsupported ? mobileStandaloneEmailMessage(d) : '';
+    if (mobileEmailUnsupported) {
+      if (msgEl) {
+        msgEl.textContent = mobileEmailUnsupportedText;
+        msgEl.style.color = 'var(--red)';
+      }
+      if (addBtn) {
+        addBtn.disabled = true;
+        addBtn.style.opacity = '0.55';
+      }
+    } else {
+      if (msgEl) msgEl.textContent = '';
+      if (addBtn) {
+        addBtn.disabled = false;
+        addBtn.style.opacity = '';
+      }
+    }
     return d.accounts || [];
   }
 
@@ -2867,6 +2900,10 @@ async function initEmailAccountsSettings() {
 
   async function renderList() {
     const accs = await fetchAccounts();
+    if (mobileEmailUnsupported) {
+      listEl.innerHTML = `<div style="padding:12px;color:var(--red);font-size:12px;line-height:1.45;text-align:center">${esc(mobileEmailUnsupportedText)}</div>`;
+      return;
+    }
     if (!accs.length) {
       listEl.innerHTML = '<div style="padding:12px;opacity:0.5;font-size:12px;text-align:center">No email accounts configured</div>';
       return;
@@ -2939,7 +2976,7 @@ async function initEmailAccountsSettings() {
         <div class="settings-row"><label class="settings-label">Port${_hint('993 for IMAPS (most providers), 143 for plain or STARTTLS. Local servers often use a custom port like 31143.')}</label><input id="eaf-imap-port" class="settings-input" type="number" value="${esc(a.imap_port || 993)}" style="max-width:100px"></div>
         <div class="settings-row"><label class="settings-label">Username${_hint('Usually your full email address.')}</label><input id="eaf-imap-user" class="settings-input" value="${esc(a.imap_user || '')}"></div>
         <div class="eaf-password-section"><div class="settings-row"><label class="settings-label">Password${_hint('Your IMAP login password. Use an app-specific password if your provider requires 2FA. Outlook / Office 365 generally requires OAuth and will not work with a normal password here.')}</label><input id="eaf-imap-pass" class="settings-input" type="password" placeholder="${isEdit && a.has_imap_password ? '(unchanged)' : ''}"></div></div>
-        <div class="settings-row"><label class="settings-label">STARTTLS${_hint('Turn ON for port 143/587 to upgrade plain to TLS. Turn OFF for port 993 (IMAPS — already encrypted) or a local server with no TLS configured.')}</label><label class="admin-switch"><input type="checkbox" id="eaf-imap-starttls" ${a.imap_starttls !== false ? 'checked' : ''}><span class="admin-slider"></span></label></div>
+        <div class="settings-row"><label class="settings-label">STARTTLS${_hint('Turn ON for port 143/587 to upgrade plain to TLS. Turn OFF for port 993 (IMAPS — already encrypted) or a local server with no TLS configured.')}</label><label class="admin-switch"><input type="checkbox" id="eaf-imap-starttls" ${(a.imap_starttls !== false && parseInt(a.imap_port || 993) !== 993) ? 'checked' : ''}><span class="admin-slider"></span></label></div>
         <div style="font-size:11px;font-weight:600;opacity:0.6;margin:8px 0 2px">SMTP (Sending) <span style="font-weight:normal;opacity:0.7">— optional, leave blank for read-only</span></div>
         <div class="settings-row"><label class="settings-label">Host${_hint('Your outgoing-mail server, e.g. smtp.gmail.com, smtp.migadu.com. Leave blank to make this account read-only.')}</label><input id="eaf-smtp-host" class="settings-input" value="${esc(a.smtp_host || '')}"></div>
         <div class="settings-row"><label class="settings-label">Port${_hint('465 for SSL/SMTPS, 587 for STARTTLS. 25 is usually blocked by ISPs.')}</label><input id="eaf-smtp-port" class="settings-input" type="number" value="${esc(a.smtp_port || 465)}" style="max-width:100px"></div>
@@ -2971,6 +3008,15 @@ async function initEmailAccountsSettings() {
       });
     }
 
+    const _effectiveEafImapStarttls = () => {
+      const port = parseInt(el('eaf-imap-port')?.value || 993);
+      return port === 993 ? false : !!el('eaf-imap-starttls')?.checked;
+    };
+    const _syncEafImapStarttlsForPort = () => {
+      const port = parseInt(el('eaf-imap-port')?.value || 993);
+      if (port === 993) el('eaf-imap-starttls').checked = false;
+    };
+
     const eafProviderNotes = {
       outlook: {
         title: 'Outlook / Office 365 needs OAuth',
@@ -2999,6 +3045,7 @@ async function initEmailAccountsSettings() {
       el('eaf-imap-host').value = p.imap.host;
       el('eaf-imap-port').value = p.imap.port;
       el('eaf-imap-starttls').checked = !!p.imap.starttls;
+      _syncEafImapStarttlsForPort();
       el('eaf-smtp-host').value = p.smtp.host;
       el('eaf-smtp-port').value = p.smtp.port;
       el('eaf-smtp-security').value = p.smtp.security || ((parseInt(p.smtp.port || 465) === 587) ? 'starttls' : 'ssl');
@@ -3017,7 +3064,7 @@ async function initEmailAccountsSettings() {
         imap_host: el('eaf-imap-host').value.trim(),
         imap_port: parseInt(el('eaf-imap-port').value) || 993,
         imap_user: el('eaf-imap-user').value.trim(),
-        imap_starttls: el('eaf-imap-starttls').checked,
+        imap_starttls: _effectiveEafImapStarttls(),
         smtp_host: el('eaf-smtp-host').value.trim(),
         smtp_port: parseInt(el('eaf-smtp-port').value) || 587,
         smtp_user: el('eaf-imap-user').value.trim(),
@@ -3043,6 +3090,9 @@ async function initEmailAccountsSettings() {
     };
     el('eaf-smtp-same').addEventListener('change', _syncSmtpSame);
     _syncSmtpSame();
+    el('eaf-imap-port').addEventListener('input', _syncEafImapStarttlsForPort);
+    el('eaf-imap-port').addEventListener('change', _syncEafImapStarttlsForPort);
+    _syncEafImapStarttlsForPort();
 
     el('eaf-cancel').addEventListener('click', () => { formEl.style.display = 'none'; });
     el('eaf-save').addEventListener('click', async () => {
@@ -3053,7 +3103,7 @@ async function initEmailAccountsSettings() {
         imap_host: el('eaf-imap-host').value.trim(),
         imap_port: parseInt(el('eaf-imap-port').value) || 993,
         imap_user: el('eaf-imap-user').value.trim(),
-        imap_starttls: el('eaf-imap-starttls').checked,
+        imap_starttls: _effectiveEafImapStarttls(),
         smtp_host: el('eaf-smtp-host').value.trim(),
         smtp_port: parseInt(el('eaf-smtp-port').value) || 465,
         smtp_security: el('eaf-smtp-security').value,
@@ -3087,6 +3137,9 @@ async function initEmailAccountsSettings() {
           el('eaf-msg').textContent = 'Saved';
           el('eaf-msg').style.color = 'var(--green,#50fa7b)';
           setTimeout(() => { formEl.style.display = 'none'; renderList(); }, 400);
+        } else if (isMobileStandaloneEmailUnsupported(d)) {
+          el('eaf-msg').textContent = mobileStandaloneEmailMessage(d);
+          el('eaf-msg').style.color = 'var(--red)';
         } else {
           el('eaf-msg').textContent = d.error || 'Save failed';
           el('eaf-msg').style.color = 'var(--red)';
@@ -3338,6 +3391,7 @@ async function initIntegrations() {
     const p = presets[presetSel.value];
     if (!p) return;
     nameIn.value = p.name || '';
+    if (p.base_url && !urlIn.value) urlIn.value = p.base_url;
     authTypeSel.value = p.auth_type || 'none';
     authHeaderIn.value = p.auth_header || '';
     descIn.value = p.description || '';
@@ -3790,6 +3844,8 @@ async function initUnifiedIntegrations() {
       ntfy:            _apiLetter('n', '#317f43'),
       vaultwarden:     _apiLetter('V', '#175ddc'),
       freshrss:        _apiLetter('R', '#ef6c00'),
+      comfyui_local:   _apiLetter('C', '#7c3aed'),
+      runcomfy_cloud:  _apiLetter('R', '#0f766e'),
     };
     const _apiIconFor = (k) => {
       if (!k) return _apiCustomIco;
@@ -3888,15 +3944,22 @@ async function initUnifiedIntegrations() {
     const _applyPreset = () => {
       const p = presets[preset.value];
       const isNtfy = preset.value === 'ntfy' || (p && (p.name || '').toLowerCase() === 'ntfy');
+      const isComfyLocal = preset.value === 'comfyui_local';
+      const isRunComfy = preset.value === 'runcomfy_cloud';
       const isUrlAuth = preset.value === 'discord_webhook'; // secret embedded in URL — no key/auth fields needed
       if (ntfyHint) {
-        ntfyHint.style.display = isNtfy ? 'block' : 'none';
+        ntfyHint.style.display = (isNtfy || isComfyLocal || isRunComfy) ? 'block' : 'none';
         if (isNtfy) {
           ntfyHint.innerHTML = 'Enter the ntfy server URL Odysseus can reach. Examples: <code>http://127.0.0.1:8091</code>, <code>http://100.x.y.z:8091</code>, or <code>https://ntfy.example.com</code>.';
+        } else if (isComfyLocal) {
+          ntfyHint.innerHTML = 'Free local route. Odysseus can auto-install and launch local ComfyUI at <code>http://127.0.0.1:8188</code>. For AMD use <code>COMFYUI_ACCELERATOR=amd</code>.';
+        } else if (isRunComfy) {
+          ntfyHint.innerHTML = 'Paid route. Enabling this lets media generation use the RunComfy CLI/cloud path when local ComfyUI is not selected.';
         }
       }
       if (url) {
-        url.placeholder = isNtfy ? 'http://127.0.0.1:8091' : isUrlAuth ? 'https://discord.com/api/webhooks/...' : 'http://localhost:8080';
+        url.placeholder = isNtfy ? 'http://127.0.0.1:8091' : isComfyLocal ? 'http://127.0.0.1:8188' : isRunComfy ? 'https://www.runcomfy.com' : isUrlAuth ? 'https://discord.com/api/webhooks/...' : 'http://localhost:8080';
+        if (p && p.base_url && !url.value) url.value = p.base_url;
       }
       // For presets that embed the secret in the URL, hide auth/key/header rows
       // so users aren't confused into thinking they need to fill them in.
@@ -4438,7 +4501,7 @@ async function initUnifiedIntegrations() {
           <div class="settings-row"><label class="settings-label">Port${_hint('993 for IMAPS (most providers), 143 for plain or STARTTLS. Local servers often use a custom port like 31143.')}</label><input id="uf-imap-port" class="settings-input" type="number" placeholder="993" style="max-width:100px"></div>
           <div class="settings-row"><label class="settings-label">Username${_hint('Yes — your full email address goes here too (e.g. you@gmail.com). Same as the Email field above for almost every provider.')}</label><input id="uf-imap-user" class="settings-input" placeholder="you@example.com"></div>
           <div class="uf-password-section"><div class="settings-row"><label class="settings-label">Password${_hint('For Gmail, iCloud, and Yahoo: paste your App Password (NOT your normal account password). For Migadu and Fastmail, your mailbox password usually works. Outlook / Office 365 generally requires OAuth and will not work with this password form.')}</label><input id="uf-imap-pass" class="settings-input" type="password" placeholder="${placeholderPass}"></div></div>
-          <div class="settings-row"><label class="settings-label">STARTTLS${_hint('Turn ON for port 143/587 to upgrade plain to TLS. Turn OFF for port 993 (IMAPS — already encrypted) or a local server with no TLS configured.')}</label><label class="admin-switch" style="margin-left:0"><input type="checkbox" id="uf-imap-starttls" checked><span class="admin-slider"></span></label></div>
+          <div class="settings-row"><label class="settings-label">STARTTLS${_hint('Turn ON for port 143/587 to upgrade plain to TLS. Turn OFF for port 993 (IMAPS — already encrypted) or a local server with no TLS configured.')}</label><label class="admin-switch" style="margin-left:0"><input type="checkbox" id="uf-imap-starttls"><span class="admin-slider"></span></label></div>
           <div style="font-size:11px;font-weight:600;opacity:0.6;margin:8px 0 2px;display:flex;align-items:center;gap:5px;"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--accent, var(--red));flex-shrink:0;" aria-hidden="true"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>SMTP (Sending) <span style="font-weight:normal;opacity:0.7">— optional, leave blank for read-only</span></div>
           <div class="settings-row"><label class="settings-label">Host${_hint('Your outgoing-mail server, e.g. smtp.gmail.com. Leave blank to make this account read-only.')}</label><input id="uf-smtp-host" class="settings-input" placeholder="smtp.example.com"></div>
           <div class="settings-row"><label class="settings-label">Port${_hint('465 for SSL/SMTPS, 587 for STARTTLS. 25 is usually blocked by ISPs.')}</label><input id="uf-smtp-port" class="settings-input" type="number" placeholder="465" style="max-width:100px"></div>
@@ -4572,6 +4635,15 @@ async function initUnifiedIntegrations() {
       });
     }
 
+    const _effectiveImapStarttls = () => {
+      const port = parseInt(el('uf-imap-port')?.value || 993);
+      return port === 993 ? false : !!el('uf-imap-starttls')?.checked;
+    };
+    const _syncImapStarttlsForPort = () => {
+      const port = parseInt(el('uf-imap-port')?.value || 993);
+      if (port === 993) el('uf-imap-starttls').checked = false;
+    };
+
     // Custom dropdown wire-up — the native <select> stays in the DOM as the
     // data source and accessibility target, but the visible UI is a button +
     // popup so each provider row can render with its SVG logo. Selecting an
@@ -4636,6 +4708,7 @@ async function initUnifiedIntegrations() {
       el('uf-imap-host').value = p.imap.host;
       el('uf-imap-port').value = p.imap.port;
       el('uf-imap-starttls').checked = !!p.imap.starttls;
+      _syncImapStarttlsForPort();
       el('uf-smtp-host').value = p.smtp.host;
       el('uf-smtp-port').value = p.smtp.port;
       el('uf-smtp-security').value = p.smtp.security || ((parseInt(p.smtp.port || 465) === 587) ? 'starttls' : 'ssl');
@@ -4679,7 +4752,7 @@ async function initUnifiedIntegrations() {
       el('uf-imap-host').value = existing.imap_host || '';
       el('uf-imap-port').value = existing.imap_port || 993;
       el('uf-imap-user').value = existing.imap_user || '';
-      el('uf-imap-starttls').checked = existing.imap_starttls !== false;
+      el('uf-imap-starttls').checked = existing.imap_starttls !== false && parseInt(existing.imap_port || 993) !== 993;
       el('uf-smtp-host').value = existing.smtp_host || '';
       el('uf-smtp-port').value = existing.smtp_port || 465;
       el('uf-smtp-security').value = _smtpSecurity(existing);
@@ -4696,6 +4769,9 @@ async function initUnifiedIntegrations() {
       el('uf-smtp-port').value = 465;
       el('uf-smtp-security').value = 'ssl';
     }
+    el('uf-imap-port').addEventListener('input', _syncImapStarttlsForPort);
+    el('uf-imap-port').addEventListener('change', _syncImapStarttlsForPort);
+    _syncImapStarttlsForPort();
     el('uf-email-cancel').addEventListener('click', () => { formEl.style.display = 'none'; });
 
     // Reset the Test button to neutral when the user edits any field
@@ -4728,7 +4804,7 @@ async function initUnifiedIntegrations() {
         imap_host: el('uf-imap-host').value.trim(),
         imap_port: parseInt(el('uf-imap-port').value) || 993,
         imap_user: el('uf-imap-user').value.trim(),
-        imap_starttls: el('uf-imap-starttls').checked,
+        imap_starttls: _effectiveImapStarttls(),
         smtp_host: el('uf-smtp-host').value.trim(),
         smtp_port: parseInt(el('uf-smtp-port').value) || 465,
         smtp_security: el('uf-smtp-security').value,
@@ -4784,7 +4860,17 @@ async function initUnifiedIntegrations() {
           body: JSON.stringify(body),
         });
         const d = await r.json();
-        if (d.ok) {
+        if (isMobileStandaloneEmailUnsupported(d)) {
+          btn.style.background = 'var(--red)';
+          btn.style.borderColor = 'var(--red)';
+          btn.style.color = '#fff';
+          btn.style.boxShadow =
+            '0 0 0 2px color-mix(in srgb, var(--red) 25%, transparent),'
+          + ' 0 0 10px 2px color-mix(in srgb, var(--red) 55%, transparent)';
+          ico.innerHTML = btn.dataset.origIco;
+          msg.textContent = mobileStandaloneEmailMessage(d);
+          msg.style.color = 'var(--red)';
+        } else if (d.ok) {
           // Button becomes the indicator — green checkmark with the
           // cookbook-style halo + breathing animation. No status text;
           // the glow is the signal.
@@ -4845,6 +4931,11 @@ async function initUnifiedIntegrations() {
           body: JSON.stringify(body),
         });
         const d = await r.json();
+        if (isMobileStandaloneEmailUnsupported(d)) {
+          el('uf-email-msg').textContent = mobileStandaloneEmailMessage(d);
+          el('uf-email-msg').style.color = 'var(--red)';
+          return;
+        }
         if (!(d.ok || d.id)) {
           el('uf-email-msg').textContent = d.error || 'Failed';
           el('uf-email-msg').style.color = 'var(--red)';
@@ -5715,13 +5806,20 @@ function syncAdminVisibility() {
    ═══════════════════════════════════════════ */
 export function open(tab) {
   if (!initialized) initAll();
+  // Invalidate animation/timer callbacks left by an interrupted close (for
+  // example, closing the Settings minimized chip and reopening immediately).
+  _closeGen++;
   syncAppearanceCheckboxes();
   if (modalEl.classList.contains('hidden')) {
     resetWindowPlacement();
   }
+  // Cancel any pending close animation from a previous close
+  const content = modalEl.querySelector('.modal-content, .settings-modal-content');
+  if (content) {
+    content.classList.remove('modal-closing');
+  }
   modalEl.classList.remove('hidden');
   syncAdminVisibility();
-  const content = modalEl.querySelector('.settings-modal-content');
   if (tab) {
     modalEl.querySelectorAll('[data-settings-tab]').forEach(b => b.classList.toggle('active', b.dataset.settingsTab === tab));
     modalEl.querySelectorAll('[data-settings-panel]').forEach(p => p.classList.toggle('hidden', p.dataset.settingsPanel !== tab));
@@ -5738,6 +5836,7 @@ export function open(tab) {
 
 export function close() {
   if (!modalEl) return;
+  const closeGen = ++_closeGen;
   // Always clear the appearance-tab body class so the rest of the app
   // doesn't keep its dimmed state if the modal got closed mid-tab.
   document.body.classList.remove('settings-appearance-open');
@@ -5745,11 +5844,20 @@ export function close() {
   const content = modalEl.querySelector('.modal-content, .settings-modal-content');
   if (content && !content.classList.contains('modal-closing')) {
     content.classList.add('modal-closing');
-    content.addEventListener('animationend', () => {
+
+    const finishClose = (event) => {
+      // Ignore animations from controls inside Settings. The fallback also
+      // detaches this listener when modalManager cancels the exit animation.
+      if (event && event.target !== content) return;
+      content.removeEventListener('animationend', finishClose);
+      if (closeGen !== _closeGen) return;
+      if (!content.classList.contains('modal-closing')) return;
       modalEl.classList.add('hidden');
       content.classList.remove('modal-closing');
-    }, { once: true });
-    setTimeout(() => { if (!modalEl.classList.contains('hidden')) { modalEl.classList.add('hidden'); content.classList.remove('modal-closing'); } }, 250);
+    };
+
+    content.addEventListener('animationend', finishClose);
+    setTimeout(finishClose, 250);
   } else {
     modalEl.classList.add('hidden');
   }

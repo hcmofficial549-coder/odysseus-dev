@@ -1,4 +1,4 @@
-"""ChatGPT subscription / Codex backend OAuth helpers.
+"""Codex subscription OAuth helpers backed by the ChatGPT account sign-in.
 
 This provider is intentionally separate from OpenAI API-key endpoints. It uses
 OpenAI account OAuth device authorization, stores refresh tokens server-side,
@@ -21,6 +21,10 @@ DEFAULT_CHATGPT_SUBSCRIPTION_BASE_URL = (
     os.getenv("CHATGPT_SUBSCRIPTION_BASE_URL", "").strip().rstrip("/")
     or "https://chatgpt.com/backend-api/codex"
 )
+# Keep the legacy provider key so existing saved endpoints/auth sessions keep
+# working. The user-facing label is Codex Subscription because this route calls
+# the Codex backend, not normal ChatGPT chat.
+CHATGPT_SUBSCRIPTION_LABEL = "Codex Subscription"
 CHATGPT_SUBSCRIPTION_PROVIDER = "chatgpt-subscription"
 CHATGPT_OAUTH_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 CHATGPT_OAUTH_TOKEN_URL = "https://auth.openai.com/oauth/token"
@@ -80,7 +84,7 @@ def chatgpt_headers(access_token: Optional[str]) -> Dict[str, str]:
         "Accept": "application/json, text/event-stream",
         "Origin": "https://chatgpt.com",
         "Referer": "https://chatgpt.com/codex",
-        "User-Agent": "Odysseus ChatGPT Subscription",
+        "User-Agent": "Odysseus Codex Subscription",
     }
     if access_token:
         headers["Authorization"] = f"Bearer {access_token}"
@@ -129,7 +133,7 @@ def _raise_for_oauth_response(response: httpx.Response, action: str) -> None:
     if response.status_code < 400:
         return
     code = ""
-    message = f"ChatGPT Subscription {action} failed with HTTP {response.status_code}."
+    message = f"{CHATGPT_SUBSCRIPTION_LABEL} {action} failed with HTTP {response.status_code}."
     try:
         payload = response.json()
         err = payload.get("error") if isinstance(payload, dict) else None
@@ -137,17 +141,17 @@ def _raise_for_oauth_response(response: httpx.Response, action: str) -> None:
             code = str(err.get("code") or err.get("type") or "").strip()
             msg = err.get("message")
             if msg:
-                message = f"ChatGPT Subscription {action} failed: {msg}"
+                message = f"{CHATGPT_SUBSCRIPTION_LABEL} {action} failed: {msg}"
         elif isinstance(err, str):
             code = err.strip()
             desc = payload.get("error_description") or payload.get("message")
             if desc:
-                message = f"ChatGPT Subscription {action} failed: {desc}"
+                message = f"{CHATGPT_SUBSCRIPTION_LABEL} {action} failed: {desc}"
     except Exception:
         pass
     if response.status_code == 429:
         raise ChatGPTSubscriptionRateLimited(
-            "ChatGPT Subscription quota or rate limit was reached. Credentials are still valid."
+            f"{CHATGPT_SUBSCRIPTION_LABEL} quota or rate limit was reached. Credentials are still valid."
         )
     if response.status_code in (401, 403) or code in {"invalid_grant", "invalid_token", "invalid_request", "refresh_token_reused"}:
         raise ChatGPTSubscriptionReauthRequired(message)
@@ -159,9 +163,9 @@ def _json_or_error(response: httpx.Response, action: str) -> Dict[str, Any]:
     try:
         data = response.json()
     except Exception as exc:
-        raise ChatGPTSubscriptionError(f"ChatGPT Subscription {action} returned invalid JSON.") from exc
+        raise ChatGPTSubscriptionError(f"{CHATGPT_SUBSCRIPTION_LABEL} {action} returned invalid JSON.") from exc
     if not isinstance(data, dict):
-        raise ChatGPTSubscriptionError(f"ChatGPT Subscription {action} returned an unexpected response.")
+        raise ChatGPTSubscriptionError(f"{CHATGPT_SUBSCRIPTION_LABEL} {action} returned an unexpected response.")
     return data
 
 
@@ -215,7 +219,7 @@ def exchange_authorization_code(authorization_code: str, code_verifier: str, tim
 def refresh_oauth_tokens(access_token: str, refresh_token: str, timeout: float = 20.0) -> Dict[str, Any]:
     del access_token
     if not refresh_token:
-        raise ChatGPTSubscriptionReauthRequired("ChatGPT Subscription is missing a refresh token. Reconnect the provider.")
+        raise ChatGPTSubscriptionReauthRequired(f"{CHATGPT_SUBSCRIPTION_LABEL} is missing a refresh token. Reconnect the provider.")
     response = httpx.post(
         CHATGPT_OAUTH_TOKEN_URL,
         headers={"Content-Type": "application/x-www-form-urlencoded"},
@@ -263,7 +267,7 @@ def resolve_runtime_credentials(auth_id: str, owner: Optional[str] = None, *, fo
             q = q.filter(ProviderAuthSession.owner == owner)
         row = q.first()
         if row is None:
-            raise ChatGPTSubscriptionAuthNotFound("ChatGPT Subscription credentials were not found for this user.")
+            raise ChatGPTSubscriptionAuthNotFound(f"{CHATGPT_SUBSCRIPTION_LABEL} credentials were not found for this user.")
 
         access_token = row.access_token or ""
         if force_refresh or access_token_is_expiring(access_token):
@@ -299,17 +303,71 @@ def to_http_exception(exc: Exception) -> HTTPException:
     return HTTPException(502, str(exc))
 
 
+def _responses_image_url(part: dict) -> str:
+    raw = (
+        part.get("image_url")
+        or part.get("imageUrl")
+        or part.get("url")
+        or part.get("data")
+    )
+    if isinstance(raw, dict):
+        raw = raw.get("url") or raw.get("image_url") or raw.get("data")
+    return raw.strip() if isinstance(raw, str) else ""
+
+
+def _responses_text(part: dict) -> str:
+    raw = part.get("text")
+    if raw is None:
+        raw = part.get("content")
+    return "" if raw is None else str(raw)
+
+
+def _responses_content_blocks(role: str, content: Any) -> list[dict]:
+    text_type = "output_text" if role == "assistant" else "input_text"
+    can_send_images = role != "assistant"
+    blocks: list[dict] = []
+
+    if isinstance(content, list):
+        for part in content:
+            if isinstance(part, dict):
+                part_type = str(part.get("type") or "").strip().lower()
+                if can_send_images and part_type in {"image_url", "input_image", "image"}:
+                    image_url = _responses_image_url(part)
+                    if image_url:
+                        blocks.append({"type": "input_image", "image_url": image_url})
+                    continue
+                text = _responses_text(part)
+                if text:
+                    blocks.append({"type": text_type, "text": text})
+            elif part is not None:
+                text = str(part)
+                if text:
+                    blocks.append({"type": text_type, "text": text})
+    elif isinstance(content, dict):
+        part_type = str(content.get("type") or "").strip().lower()
+        if can_send_images and part_type in {"image_url", "input_image", "image"}:
+            image_url = _responses_image_url(content)
+            if image_url:
+                blocks.append({"type": "input_image", "image_url": image_url})
+        text = _responses_text(content)
+        if text:
+            blocks.append({"type": text_type, "text": text})
+    elif content is not None:
+        blocks.append({"type": text_type, "text": str(content)})
+
+    if not blocks:
+        blocks.append({"type": text_type, "text": ""})
+    return blocks
+
+
 def build_responses_input(messages: list[dict]) -> list[dict]:
     input_items: list[dict] = []
     for msg in messages or []:
         role = msg.get("role") or "user"
         if role == "tool":
             role = "user"
-        content = msg.get("content")
-        if isinstance(content, list):
-            text = "\n".join(str(part.get("text") or part.get("content") or "") for part in content if isinstance(part, dict))
-        else:
-            text = "" if content is None else str(content)
-        input_type = "output_text" if role == "assistant" else "input_text"
-        input_items.append({"role": role, "content": [{"type": input_type, "text": text}]})
+        input_items.append({
+            "role": role,
+            "content": _responses_content_blocks(role, msg.get("content")),
+        })
     return input_items

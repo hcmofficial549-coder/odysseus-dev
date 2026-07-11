@@ -5,6 +5,7 @@ import Storage from './storage.js';
 import uiModule from './ui.js';
 import { initColorPickers, attachColorPicker } from './colorPicker.js';
 import { hexToRgb } from './color/hex.js';
+import { setCursorTrailEnabled } from './effects/cursorTrail.js';
 import { makeWindowDraggable } from './windowDrag.js';
 import { snapModalToZone } from './tileManager.js';
 
@@ -256,11 +257,28 @@ function generateHarmonyColors(accentHex, harmonyType, mode) {
 
 export function applyColors(colors) {
   const s = document.documentElement.style;
+  const adv = colors.advanced || {};
   s.setProperty('--bg', colors.bg);
   s.setProperty('--fg', colors.fg);
   s.setProperty('--panel', colors.panel);
   s.setProperty('--border', colors.border);
   if (colors.red) s.setProperty('--red', colors.red);
+  const accentPrimary = colors.cyan || adv.accentPrimary;
+  if (accentPrimary) {
+    s.setProperty('--color-accent', accentPrimary);
+    s.setProperty('--accent-primary', accentPrimary);
+  } else {
+    s.removeProperty('--color-accent');
+    s.removeProperty('--accent-primary');
+  }
+  const accentWarm = colors.warm || adv.accentWarm;
+  if (accentWarm) {
+    s.setProperty('--accent-warm', accentWarm);
+    s.setProperty('--warn', accentWarm);
+  } else {
+    s.removeProperty('--accent-warm');
+    s.removeProperty('--warn');
+  }
 
   // Keep the mobile browser toolbar / status bar matched to the theme bg
   // (same as the early head-script does on first paint).
@@ -281,7 +299,6 @@ export function applyColors(colors) {
   s.setProperty('--hl-params', syn.params);
 
   // Apply advanced overrides (or defaults)
-  const adv = colors.advanced || {};
   const defaults = computeAdvancedDefaults(colors);
   for (const { key, css } of ADV_KEYS) {
     s.setProperty(css, adv[key] || defaults[key]);
@@ -390,25 +407,67 @@ export function applyFontDensity(font, density) {
 
 // UI text-size scale (accessibility). Global and independent of the active
 // theme, so the chosen size persists across theme switches. Stored as a plain
-// percentage string ('100' | '110' | '125' | '150').
+// percentage string ('90' | '100' | '110' | '125' | '140').
 const UI_SCALE_KEY = 'odysseus-ui-scale';
 const DEFAULT_UI_SCALE = '100';
+export const UI_SCALE_STEPS = ['90', '100', '110', '125', '140'];
+const UI_SCALE_CLASSES = UI_SCALE_STEPS
+  .filter(s => s !== DEFAULT_UI_SCALE)
+  .map(s => 'ui-scale-' + s);
+
+export function normalizeUiScale(scale) {
+  const s = String(scale || DEFAULT_UI_SCALE);
+  return UI_SCALE_STEPS.includes(s) ? s : DEFAULT_UI_SCALE;
+}
 
 export function applyUiScale(scale) {
-  const s = scale || DEFAULT_UI_SCALE;
-  // Only one non-default scale ('125'). Remove any legacy classes too so an
-  // older stored value can't leave a stale zoom applied.
-  document.documentElement.classList.remove('ui-scale-110', 'ui-scale-125', 'ui-scale-140');
-  if (s === '125') document.documentElement.classList.add('ui-scale-125');
+  const s = normalizeUiScale(scale);
+  // Remove current and legacy scale classes so an older stored value can't
+  // leave a stale zoom applied.
+  document.documentElement.classList.remove(...UI_SCALE_CLASSES, 'ui-scale-150');
+  if (s !== DEFAULT_UI_SCALE) document.documentElement.classList.add('ui-scale-' + s);
+  return s;
+}
+
+export function getUiScale() {
+  try {
+    return normalizeUiScale(localStorage.getItem(UI_SCALE_KEY) || DEFAULT_UI_SCALE);
+  } catch (e) {
+    return DEFAULT_UI_SCALE;
+  }
+}
+
+export function setUiScale(scale, opts = {}) {
+  const persist = opts.persist !== false;
+  const syncControl = opts.syncControl !== false;
+  const s = applyUiScale(scale);
+  if (persist) {
+    try { localStorage.setItem(UI_SCALE_KEY, s); } catch (e) {}
+  }
+  if (syncControl) {
+    const select = document.getElementById('theme-text-size-select');
+    if (select) select.value = s;
+  }
+  try {
+    window.dispatchEvent(new CustomEvent('odysseus:ui-scale-change', { detail: { scale: s } }));
+  } catch (e) {}
+  return s;
+}
+
+export function adjustUiScale(delta) {
+  const current = getUiScale();
+  const idx = Math.max(0, UI_SCALE_STEPS.indexOf(current));
+  const nextIdx = Math.max(0, Math.min(UI_SCALE_STEPS.length - 1, idx + (delta < 0 ? -1 : 1)));
+  return setUiScale(UI_SCALE_STEPS[nextIdx]);
 }
 
 const _BG_CLASSES = ['bg-pattern-dots',
   'bg-pattern-synapse', 'bg-pattern-rain', 'bg-pattern-constellations',
   'bg-pattern-perlin-flow',
-  'bg-pattern-petals', 'bg-pattern-sparkles', 'bg-pattern-embers'];
+  'bg-pattern-petals', 'bg-pattern-sparkles', 'bg-pattern-embers', 'bg-pattern-aurora'];
 const _CANVAS_PATTERNS = { synapse: _initSynapse, rain: _initRain, constellations: _initConstellations,
   'perlin-flow': _initPerlinFlow,
-  petals: _initPetals, sparkles: _initSparkles, embers: _initEmbers };
+  petals: _initPetals, sparkles: _initSparkles, embers: _initEmbers, aurora: _initAurora };
 
 export function applyBgEffectColor(color) {
   document.documentElement.style.setProperty('--bg-effect-color', color || '');
@@ -446,7 +505,7 @@ export function applyBgPattern(pattern) {
   const p = pattern || 'none';
   document.body.classList.remove(..._BG_CLASSES);
   // Clean up any canvas backgrounds
-  document.querySelectorAll('#synapse-canvas, #rain-canvas, #constellations-canvas, #perlin-flow-canvas, #petals-canvas, #sparkles-canvas, #embers-canvas').forEach(c => c.remove());
+  document.querySelectorAll('#synapse-canvas, #rain-canvas, #constellations-canvas, #perlin-flow-canvas, #petals-canvas, #sparkles-canvas, #embers-canvas, #aurora-canvas').forEach(c => c.remove());
   if (p !== 'none') document.body.classList.add('bg-pattern-' + p);
   if (_CANVAS_PATTERNS[p]) _CANVAS_PATTERNS[p]();
   // Hide sliders that do nothing on static patterns.
@@ -1153,11 +1212,11 @@ export function initThemeUI() {
     const nts = textSizeSelect.cloneNode(true); textSizeSelect.parentNode.replaceChild(nts, textSizeSelect);
     let initScale = DEFAULT_UI_SCALE;
     try { initScale = localStorage.getItem(UI_SCALE_KEY) || DEFAULT_UI_SCALE; } catch (e) {}
+    initScale = normalizeUiScale(initScale);
     nts.value = initScale;
     applyUiScale(initScale);
     nts.addEventListener('change', () => {
-      applyUiScale(nts.value);
-      try { localStorage.setItem(UI_SCALE_KEY, nts.value); } catch (e) {}
+      setUiScale(nts.value);
     });
   }
   if (patternSelect) {
@@ -1203,6 +1262,21 @@ export function initThemeUI() {
       applyFrostedGlass(frostedToggle.checked);
       const s = getSaved(); if (s) _saveFull(s.name, s.colors);
     });
+  }
+
+  // Cursor trail toggle (visual FX)
+  const cursorTrailToggle = document.getElementById('theme-cursor-trail-toggle');
+  if (cursorTrailToggle) {
+    let cursorTrailEnabled = true;
+    try { cursorTrailEnabled = localStorage.getItem('odysseus-cursor-trail') !== 'off'; } catch (_) {}
+    cursorTrailToggle.checked = cursorTrailEnabled;
+    if (cursorTrailToggle.dataset.cursorTrailBound !== '1') {
+      cursorTrailToggle.dataset.cursorTrailBound = '1';
+      cursorTrailToggle.addEventListener('change', () => {
+        try { localStorage.setItem('odysseus-cursor-trail', cursorTrailToggle.checked ? 'on' : 'off'); } catch (_) {}
+        setCursorTrailEnabled(cursorTrailToggle.checked);
+      });
+    }
   }
 
   // --- Color Harmony Generator (inside Advanced section) ---
@@ -1518,6 +1592,28 @@ export function closePopup() {
 // Expose for app.js wiring + AI ui_control
 export function getCustomThemes() { return _loadCustomThemes(); }
 
+const BG_EFFECT_FRAME_MS = 1000 / 30;
+
+function _getBgCanvasContext(canvas) {
+  return canvas.getContext('2d', { alpha: true, desynchronized: true }) || canvas.getContext('2d');
+}
+
+function _scheduleBgEffectFrame(draw, state) {
+  requestAnimationFrame((ts) => {
+    if (document.hidden) {
+      state.last = ts;
+      setTimeout(() => _scheduleBgEffectFrame(draw, state), 250);
+      return;
+    }
+    if (!state.last || ts - state.last >= BG_EFFECT_FRAME_MS) {
+      state.last = ts;
+      draw(ts);
+      return;
+    }
+    _scheduleBgEffectFrame(draw, state);
+  });
+}
+
 // ── Synapse background effect ──
 // Uses the CSS grid pattern as base, overlays fast-moving small light pulses on grid lines
 function _initSynapse() {
@@ -1529,7 +1625,7 @@ function _initSynapse() {
   // don't announce an empty canvas and axe's "region" rule doesn't flag it.
   canvas.setAttribute('aria-hidden', 'true');
   document.body.prepend(canvas);
-  const ctx = canvas.getContext('2d');
+  const ctx = _getBgCanvasContext(canvas);
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
   const GRID = 24; // matches CSS grid size
   const MAX_PULSES = 20;
@@ -1538,6 +1634,7 @@ function _initSynapse() {
   const TRAIL_LEN = 12; // pixels of trailing glow
 
   let W, H, cols, rows, pulses = [];
+  const frame = { last: 0 };
 
   function resize() {
     W = window.innerWidth; H = window.innerHeight;
@@ -1573,7 +1670,7 @@ function _initSynapse() {
       canvas.remove();
       return;
     }
-    requestAnimationFrame(draw);
+    _scheduleBgEffectFrame(draw, frame);
     ctx.clearRect(0, 0, W, H);
     const c = getColor();
 
@@ -1612,7 +1709,7 @@ function _initSynapse() {
 
     ctx.globalAlpha = 1;
   }
-  draw();
+  _scheduleBgEffectFrame(draw, frame);
 }
 
 // ── Rain — thin vertical streaks falling ──
@@ -1625,11 +1722,12 @@ function _initRain() {
   // don't announce an empty canvas and axe's "region" rule doesn't flag it.
   canvas.setAttribute('aria-hidden', 'true');
   document.body.prepend(canvas);
-  const ctx = canvas.getContext('2d');
+  const ctx = _getBgCanvasContext(canvas);
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
   let W, H;
   const drops = [];
   const MAX_DROPS = 130;
+  const frame = { last: 0 };
 
   function resize() {
     W = window.innerWidth; H = window.innerHeight;
@@ -1657,7 +1755,7 @@ function _initRain() {
       canvas.remove();
       return;
     }
-    requestAnimationFrame(draw);
+    _scheduleBgEffectFrame(draw, frame);
     ctx.clearRect(0, 0, W, H);
     const c = getColor();
     // Intensity also controls rain speed + spawn rate (feels slower/lighter when dim)
@@ -1687,7 +1785,7 @@ function _initRain() {
     }
     ctx.globalAlpha = 1;
   }
-  draw();
+  _scheduleBgEffectFrame(draw, frame);
 }
 
 // ── Constellations — static dots that slowly form/dissolve connecting lines ──
@@ -1700,12 +1798,13 @@ function _initConstellations() {
   // don't announce an empty canvas and axe's "region" rule doesn't flag it.
   canvas.setAttribute('aria-hidden', 'true');
   document.body.prepend(canvas);
-  const ctx = canvas.getContext('2d');
+  const ctx = _getBgCanvasContext(canvas);
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
   let W, H;
   const STAR_COUNT = 50;
   const CONNECT_DIST = 120;
   let stars = [];
+  const frame = { last: 0 };
 
   function resize() {
     W = window.innerWidth; H = window.innerHeight;
@@ -1743,7 +1842,7 @@ function _initConstellations() {
       canvas.remove();
       return;
     }
-    requestAnimationFrame(draw);
+    _scheduleBgEffectFrame(draw, frame);
     t += 0.01;
     ctx.clearRect(0, 0, W, H);
     const c = getColor();
@@ -1784,7 +1883,7 @@ function _initConstellations() {
     }
     ctx.globalAlpha = 1;
   }
-  draw();
+  _scheduleBgEffectFrame(draw, frame);
 }
 
 // ── Noise helper for Perlin effects ──
@@ -1806,10 +1905,11 @@ function _initPerlinFlow() {
   // don't announce an empty canvas and axe's "region" rule doesn't flag it.
   canvas.setAttribute('aria-hidden', 'true');
   document.body.prepend(canvas);
-  const ctx = canvas.getContext('2d');
+  const ctx = _getBgCanvasContext(canvas);
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
   let W, H, t = 0;
   const particles = [];
+  const frame = { last: 0 };
   function resize() {
     W = window.innerWidth; H = window.innerHeight;
     canvas.width = W * dpr; canvas.height = H * dpr;
@@ -1834,7 +1934,7 @@ function _initPerlinFlow() {
   }
   function draw() {
     if (!document.body.classList.contains('bg-pattern-perlin-flow')) { window.removeEventListener('resize', _onResize); canvas.remove(); return; }
-    requestAnimationFrame(draw);
+    _scheduleBgEffectFrame(draw, frame);
     ctx.fillStyle = getFade();
     ctx.fillRect(0, 0, W, H);
     const c = getColor();
@@ -1850,7 +1950,7 @@ function _initPerlinFlow() {
     ctx.globalAlpha = 1;
     t++;
   }
-  draw();
+  _scheduleBgEffectFrame(draw, frame);
 }
 
 // ── Petals — gentle falling flower petals ──
@@ -1863,10 +1963,11 @@ function _initPetals() {
   // don't announce an empty canvas and axe's "region" rule doesn't flag it.
   canvas.setAttribute('aria-hidden', 'true');
   document.body.prepend(canvas);
-  const ctx = canvas.getContext('2d');
+  const ctx = _getBgCanvasContext(canvas);
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
   let W, H;
   const petals = [];
+  const frame = { last: 0 };
   function makePetal() {
     return {
       x: Math.random() * W, y: -10 - Math.random() * 40,
@@ -1888,7 +1989,7 @@ function _initPetals() {
   function getColor() { const s = getComputedStyle(document.documentElement); return s.getPropertyValue('--bg-effect-color').trim() || s.getPropertyValue('--fg').trim() || '#9cdef2'; }
   function draw() {
     if (!document.body.classList.contains('bg-pattern-petals')) { window.removeEventListener('resize', _onResize); canvas.remove(); return; }
-    requestAnimationFrame(draw);
+    _scheduleBgEffectFrame(draw, frame);
     ctx.clearRect(0, 0, W, H);
     const c = getColor();
     const sz = _getEffectSize();
@@ -1907,7 +2008,7 @@ function _initPetals() {
     });
     ctx.globalAlpha = 1;
   }
-  draw();
+  _scheduleBgEffectFrame(draw, frame);
 }
 
 // ── Sparkles — twinkling star-shaped sparkles ──
@@ -1920,10 +2021,11 @@ function _initSparkles() {
   // don't announce an empty canvas and axe's "region" rule doesn't flag it.
   canvas.setAttribute('aria-hidden', 'true');
   document.body.prepend(canvas);
-  const ctx = canvas.getContext('2d');
+  const ctx = _getBgCanvasContext(canvas);
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
   let W, H;
   const sparkles = [];
+  const frame = { last: 0 };
   function makeSpark() {
     return { x: Math.random() * W, y: Math.random() * H, size: 2 + Math.random() * 5, phase: Math.random() * Math.PI * 2, speed: 0.015 + Math.random() * 0.03, life: 0.5 + Math.random() * 0.5 };
   }
@@ -1950,7 +2052,7 @@ function _initSparkles() {
   }
   function draw() {
     if (!document.body.classList.contains('bg-pattern-sparkles')) { window.removeEventListener('resize', _onResize); canvas.remove(); return; }
-    requestAnimationFrame(draw);
+    _scheduleBgEffectFrame(draw, frame);
     ctx.clearRect(0, 0, W, H);
     const c = getColor();
     const sizeMult = _getEffectSize();
@@ -1965,10 +2067,95 @@ function _initSparkles() {
     });
     ctx.globalAlpha = 1;
   }
-  draw();
+  _scheduleBgEffectFrame(draw, frame);
 }
 
 // ── Embers — warm particles rising with glow and occasional spark bursts ──
+function _initAurora() {
+  if (document.getElementById('aurora-canvas')) return;
+  const canvas = document.createElement('canvas');
+  canvas.id = 'aurora-canvas';
+  canvas.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:0;';
+  canvas.setAttribute('aria-hidden', 'true');
+  document.body.prepend(canvas);
+  const ctx = _getBgCanvasContext(canvas);
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  let W, H;
+  const frame = { last: 0 };
+  const waves = [];
+  function makeWaves() {
+    waves.length = 0;
+    const count = 5 + Math.floor(Math.random() * 3);
+    for (let i = 0; i < count; i++) {
+      waves.push({
+        y: Math.random(),
+        amp: 0.04 + Math.random() * 0.08,
+        freq: 1 + Math.random() * 2,
+        speed: 0.0002 + Math.random() * 0.0005,
+        phase: Math.random() * Math.PI * 2,
+        width: 0.08 + Math.random() * 0.12,
+      });
+    }
+  }
+  function resize() {
+    W = window.innerWidth; H = window.innerHeight;
+    canvas.width = W * dpr; canvas.height = H * dpr;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    if (waves.length === 0) makeWaves();
+  }
+  resize();
+  const _onResize = () => resize();
+  window.addEventListener('resize', _onResize);
+  function getColor() {
+    const s = getComputedStyle(document.documentElement);
+    return s.getPropertyValue('--bg-effect-color').trim() || s.getPropertyValue('--fg').trim() || '#9cdef2';
+  }
+  function hexToRgba(hex, a) {
+    const { r, g, b } = hexToRgb(hex) || { r: 0, g: 0, b: 0 };
+    return `rgba(${r},${g},${b},${a})`;
+  }
+  let t = 0;
+  function draw() {
+    if (!document.body.classList.contains('bg-pattern-aurora')) {
+      window.removeEventListener('resize', _onResize);
+      canvas.remove();
+      return;
+    }
+    _scheduleBgEffectFrame(draw, frame);
+    t += 1;
+    const baseColor = getColor();
+    const rawIntensity = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--bg-effect-intensity'));
+    const intensity = Math.max(0, Math.min(1, Number.isFinite(rawIntensity) ? rawIntensity : 1));
+    const size = Math.max(0.2, Math.min(3, parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--bg-effect-size')) || 1));
+    ctx.clearRect(0, 0, W, H);
+    const gradient = ctx.createLinearGradient(0, 0, 0, H);
+    gradient.addColorStop(0, hexToRgba(baseColor, 0.02 * intensity));
+    gradient.addColorStop(1, hexToRgba(baseColor, 0.0));
+    ctx.fillStyle = gradient;
+    ctx.fillRect(0, 0, W, H);
+    waves.forEach((w, idx) => {
+      const yBase = w.y * H;
+      ctx.beginPath();
+      for (let x = 0; x <= W; x += 4) {
+        const phase = w.phase + t * w.speed + (x / W) * w.freq * Math.PI * 2;
+        const y = yBase + Math.sin(phase) * (w.amp * H) + Math.sin(phase * 0.5 + t * 0.003) * (w.amp * H * 0.3);
+        if (x === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+      ctx.lineTo(W, H);
+      ctx.lineTo(0, H);
+      ctx.closePath();
+      const g = ctx.createLinearGradient(0, yBase - H * w.width * size, 0, yBase + H * w.width * size);
+      g.addColorStop(0, hexToRgba(baseColor, 0));
+      g.addColorStop(0.5, hexToRgba(baseColor, 0.18 * intensity));
+      g.addColorStop(1, hexToRgba(baseColor, 0));
+      ctx.fillStyle = g;
+      ctx.fill();
+    });
+  }
+  _scheduleBgEffectFrame(draw, frame);
+}
+
 function _initEmbers() {
   if (document.getElementById('embers-canvas')) return;
   const canvas = document.createElement('canvas');
@@ -1978,10 +2165,11 @@ function _initEmbers() {
   // don't announce an empty canvas and axe's "region" rule doesn't flag it.
   canvas.setAttribute('aria-hidden', 'true');
   document.body.prepend(canvas);
-  const ctx = canvas.getContext('2d');
+  const ctx = _getBgCanvasContext(canvas);
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
   let W, H;
   const embers = [];
+  const frame = { last: 0 };
   function makeEmber() {
     return {
       x: Math.random() * W,
@@ -2020,7 +2208,7 @@ function _initEmbers() {
       canvas.remove();
       return;
     }
-    requestAnimationFrame(draw);
+    _scheduleBgEffectFrame(draw, frame);
     // Fade previous frame (destination-out keeps canvas transparent where no embers)
     ctx.globalCompositeOperation = 'destination-out';
     ctx.fillStyle = 'rgba(0,0,0,0.18)';
@@ -2068,13 +2256,14 @@ function _initEmbers() {
     }
     ctx.globalCompositeOperation = 'source-over';
   }
-  draw();
+  _scheduleBgEffectFrame(draw, frame);
 }
 
 const themeModule = { initThemeUI, togglePopup, closePopup, makeDraggable,
                        THEMES, applyColors, applyFontDensity, applyBgPattern,
                        applyBgEffectColor, applyBgEffectIntensity, applyBgEffectSize,
-                       applyFrostedGlass,
+                       applyFrostedGlass, applyUiScale, getUiScale, setUiScale,
+                       adjustUiScale,
                        save, getSaved, saveCustomTheme, deleteCustomTheme,
                        getCustomThemes };
 

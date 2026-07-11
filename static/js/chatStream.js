@@ -175,6 +175,26 @@ export function handleUIControl(uiData) {
           var fn = mod.openPanel || mod.openNotes || (mod.default && (mod.default.openPanel || mod.default.openNotes));
           if (fn) fn();
         }).catch(function(){});
+      } else if (panel === 'calendar') {
+        import('./calendar.js').then(function(mod) {
+          var fn = mod.openCalendar || (mod.default && mod.default.openCalendar);
+          if (fn) fn();
+        }).catch(function(){});
+      } else if (panel === 'tasks') {
+        import('./tasks.js').then(function(mod) {
+          var fn = mod.openTasks || (mod.default && mod.default.openTasks);
+          if (fn) fn();
+        }).catch(function(){});
+      } else if (panel === 'research') {
+        import('./research/panel.js').then(function(mod) {
+          var fn = mod.openPanel || (mod.default && mod.default.openPanel);
+          if (fn) fn();
+        }).catch(function(){});
+      } else if (panel === 'workspace') {
+        import('./workspace.js').then(function(mod) {
+          var fn = mod.openWorkspaceBrowser || (mod.default && mod.default.openWorkspaceBrowser);
+          if (fn) fn();
+        }).catch(function(){});
       } else if (panel === 'memories' || panel === 'skills' || panel === 'settings') {
         // These live in the sidebar / settings drawer — most just need
         // an existing button click.
@@ -272,6 +292,7 @@ export function notifyResearchComplete(sessionId, query) {
   var isHidden = document.hidden;
   var isOtherSession = sessionModule && sessionModule.getCurrentSessionId() !== sessionId;
   if (!isHidden && !isOtherSession) return;
+  if (_notifyAndroidResearchComplete(sessionId, query)) return;
   if (!('Notification' in window) || Notification.permission !== 'granted') return;
   var body = query ? 'Research on "' + query.substring(0, 60) + '" is ready' : 'Your deep research has completed';
   var notification = new Notification('Research Complete', {
@@ -286,6 +307,17 @@ export function notifyResearchComplete(sessionId, query) {
     notification.close();
   };
   setTimeout(function() { notification.close(); }, 10000);
+}
+
+function _notifyAndroidResearchComplete(sessionId, query) {
+  try {
+    var bridge = window.OdysseusAndroid;
+    if (!bridge || typeof bridge.notifyResearchComplete !== 'function') return false;
+    bridge.notifyResearchComplete(String(sessionId || ''), String(query || ''));
+    return true;
+  } catch (e) {
+    return false;
+  }
 }
 
 const chatStream = {

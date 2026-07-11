@@ -19,6 +19,10 @@ import {
 } from './calendar/utils.js';
 
 const API_BASE = window.location.origin;
+const CAL_DETAIL_STORAGE_KEY = 'odysseus.cal.detailH';
+const CAL_DETAIL_MIN_H = 64;
+const CAL_DETAIL_DEFAULT_H = 240;
+const CAL_GRID_MIN_H = 118;
 // Open a file picker, upload the chosen image, return the URL string.
 function _pickCalBgImage() {
   return new Promise(resolve => {
@@ -695,6 +699,33 @@ function _getModal() {
   return _modal;
 }
 
+function _resetCalendarFreshWindowMode(modal) {
+  const content = modal?.querySelector?.('.cal-modal-content, .modal-content');
+  if (!modal || !content) return;
+
+  const staleFullscreen = modal.classList.contains('modal-full-expanded')
+    || content.dataset?._tileZone === 'fullscreen';
+  const staleTileSnap = !!content.dataset?._tileZone || !!content.dataset?._tilePreSnap;
+  if (!staleFullscreen && !staleTileSnap && !content._fullExpandReturnState) return;
+
+  modal.classList.remove('modal-full-expanded');
+  delete content.dataset._tileZone;
+  delete content.dataset._tilePreSnap;
+  delete content._fullExpandReturnState;
+  [
+    'position', 'left', 'top', 'right', 'bottom', 'width', 'max-width',
+    'height', 'min-height', 'max-height', 'margin', 'transform', 'transition',
+    'border-radius',
+  ].forEach((prop) => content.style.removeProperty(prop));
+
+  const expandBtn = modal.querySelector('.modal-expand-btn, [data-full-expand]');
+  if (expandBtn) {
+    expandBtn.classList.remove('active');
+    expandBtn.title = 'Full expand';
+    expandBtn.setAttribute('aria-label', 'Full expand window');
+  }
+}
+
 // ── Render dispatch ──
 
 // Quick-add hint examples — the placeholder cycles through these every few
@@ -800,6 +831,119 @@ function _zoomView(direction) {
 let _renderToken = 0;
 function _isStaleRender(t) { return t !== _renderToken; }
 
+function _prepareCalendarBodyForCalendarView(body) {
+  if (!body) return;
+  body.classList.remove('cal-form-mode');
+  body.scrollTop = 0;
+}
+
+function _prepareCalendarBodyForForm(body) {
+  if (!body) return;
+  body.classList.add('cal-form-mode');
+  body.scrollTop = 0;
+}
+
+function _calDetailLayoutKey() {
+  const modal = document.getElementById('calendar-modal');
+  const constrained = !!(
+    modal?.classList?.contains('modal-left-docked') ||
+    modal?.classList?.contains('modal-right-docked') ||
+    modal?.classList?.contains('modal-top-docked') ||
+    modal?.classList?.contains('modal-bottom-docked') ||
+    modal?.classList?.contains('modal-full-expanded')
+  );
+  const orientation = window.matchMedia('(orientation: landscape)').matches ? 'landscape' : 'portrait';
+  const compact = window.innerWidth <= 768 || constrained ? 'compact' : 'desktop';
+  return `${CAL_DETAIL_STORAGE_KEY}:${compact}:${orientation}:${_view}`;
+}
+
+function _visibleCalendarChildren(calBody) {
+  return Array.from(calBody?.children || []).filter((el) => {
+    if (!el) return false;
+    const cs = getComputedStyle(el);
+    return cs.display !== 'none' && cs.visibility !== 'hidden';
+  });
+}
+
+function _calendarRowGap(calBody) {
+  const cs = getComputedStyle(calBody);
+  const raw = cs.rowGap && cs.rowGap !== 'normal' ? cs.rowGap : cs.gap;
+  const n = parseFloat(raw || '0');
+  return Number.isFinite(n) ? n : 0;
+}
+
+function _calOuterBlockSize(el, { includeBox = true } = {}) {
+  if (!el) return 0;
+  const cs = getComputedStyle(el);
+  const top = parseFloat(cs.marginTop || '0') || 0;
+  const bottom = parseFloat(cs.marginBottom || '0') || 0;
+  const box = includeBox ? (el.getBoundingClientRect?.().height || 0) : 0;
+  return box + top + bottom;
+}
+
+function _calDetailBounds(calBody) {
+  const bodyH = Math.max(0, Math.round(calBody?.clientHeight || 0));
+  if (!bodyH) return { min: CAL_DETAIL_MIN_H, max: CAL_DETAIL_DEFAULT_H, def: CAL_DETAIL_DEFAULT_H };
+  const children = _visibleCalendarChildren(calBody);
+  const grid = calBody.querySelector('.cal-grid, .cal-wk-wrap');
+  const splitter = calBody.querySelector('.cal-splitter');
+  const detail = calBody.querySelector('.cal-day-detail');
+  const fixedH = children.reduce((sum, el) => {
+    if (el === grid || el === splitter || el === detail) return sum;
+    return sum + _calOuterBlockSize(el);
+  }, 0);
+  const gapH = Math.max(0, children.length - 1) * _calendarRowGap(calBody);
+  const splitterH = _calOuterBlockSize(splitter);
+  const gridMargins = _calOuterBlockSize(grid, { includeBox: false });
+  const detailMargins = _calOuterBlockSize(detail, { includeBox: false });
+  const available = Math.max(0, bodyH - fixedH - splitterH - gapH);
+  const adjustable = Math.max(0, available - gridMargins - detailMargins);
+  const minDetail = Math.max(CAL_DETAIL_MIN_H, Math.min(110, Math.floor(adjustable * 0.28)));
+  const minGrid = Math.max(88, Math.min(CAL_GRID_MIN_H, Math.floor(adjustable * 0.4)));
+  const maxDetail = Math.max(minDetail, adjustable - minGrid);
+  const def = Math.max(minDetail, Math.min(CAL_DETAIL_DEFAULT_H, Math.floor(adjustable * 0.48), maxDetail));
+  return { min: minDetail, max: maxDetail, def };
+}
+
+function _clampCalDetailHeight(calBody, value) {
+  const bounds = _calDetailBounds(calBody);
+  const requested = Number.isFinite(value) && value > 0 ? value : bounds.def;
+  return Math.max(bounds.min, Math.min(bounds.max, requested));
+}
+
+function _setCalDetailHeight(calBody, value, { persist = false } = {}) {
+  if (!calBody) return 0;
+  const h = _clampCalDetailHeight(calBody, value);
+  calBody.style.setProperty('--cal-detail-h', h + 'px');
+  if (persist) {
+    try {
+      localStorage.setItem(_calDetailLayoutKey(), String(Math.round(h)));
+      localStorage.removeItem(CAL_DETAIL_STORAGE_KEY);
+    } catch {}
+  }
+  return h;
+}
+
+function _restoreCalDetailHeight(calBody) {
+  if (!calBody || calBody.classList.contains('cal-form-mode')) return;
+  const key = _calDetailLayoutKey();
+  let saved = 0;
+  try {
+    saved = parseInt(localStorage.getItem(key) || localStorage.getItem(CAL_DETAIL_STORAGE_KEY) || '0', 10);
+  } catch { saved = 0; }
+  _setCalDetailHeight(calBody, saved || _calDetailBounds(calBody).def);
+  calBody._calDetailLayoutKey = key;
+}
+
+function _resetCalDetailHeight(calBody) {
+  if (!calBody) return;
+  try {
+    localStorage.removeItem(_calDetailLayoutKey());
+    localStorage.removeItem(CAL_DETAIL_STORAGE_KEY);
+  } catch {}
+  _setCalDetailHeight(calBody, _calDetailBounds(calBody).def);
+}
+
 function _render() {
   // Don't rebuild the DOM while the user is typing in quick-add — defer it.
   if (_qaTyping()) { _renderPending = true; return; }
@@ -827,6 +971,7 @@ function _render() {
 function _renderEmpty() {
   const body = document.getElementById('cal-body');
   if (!body) return;
+  _prepareCalendarBodyForCalendarView(body);
   const hasError = !!_calendarsError;
   body.innerHTML = `
     <div class="cal-empty-state">
@@ -1006,6 +1151,7 @@ function _eventVisible(e) {
 async function _renderMonth() {
   const body = document.getElementById('cal-body');
   if (!body) return;
+  _prepareCalendarBodyForCalendarView(body);
   const _tk = _renderToken;
   const [rs, re] = _monthRange(_currentDate);
   await _fetchEvents(rs, re);
@@ -1157,8 +1303,9 @@ async function _renderMonth() {
     const todayCell = body.querySelector('.cal-day.cal-today');
     if (todayCell && _newGrid) {
       requestAnimationFrame(() => {
-        try { todayCell.scrollIntoView({ block: 'center', behavior: 'auto' }); }
-        catch { _newGrid.scrollTop = Math.max(0, todayCell.offsetTop - _newGrid.clientHeight / 2); }
+        const target = todayCell.offsetTop - _newGrid.offsetTop - Math.max(0, (_newGrid.clientHeight - todayCell.offsetHeight) / 2);
+        _newGrid.scrollTop = Math.max(0, target);
+        body.scrollTop = 0;
       });
     }
   }
@@ -1255,6 +1402,7 @@ function _wkEventTopHeight(ev, dayStr) {
 async function _renderWeek() {
   const body = document.getElementById('cal-body');
   if (!body) return;
+  _prepareCalendarBodyForCalendarView(body);
   const _tk = _renderToken;
   // Stash current scroll so we can restore after re-render (zoom, drag,
   // etc. all rebuild the body).
@@ -1651,6 +1799,7 @@ function _showEventFormForRange(ds, startHHMM, endHHMM) {
 async function _renderAgenda() {
   const body = document.getElementById('cal-body');
   if (!body) return;
+  _prepareCalendarBodyForCalendarView(body);
   const _tk = _renderToken;
   // Fetch 3 months forward from current date
   const s = _ds(_currentDate);
@@ -1749,6 +1898,7 @@ async function _renderAgenda() {
 async function _renderSearch() {
   const body = document.getElementById('cal-body');
   if (!body) return;
+  _prepareCalendarBodyForCalendarView(body);
   // Search across all events in pool (no fetch needed — use what we have)
   const q = _searchQuery.toLowerCase();
   const results = Object.values(_allEvents)
@@ -1803,6 +1953,7 @@ async function _renderSearch() {
 async function _renderYear() {
   const body = document.getElementById('cal-body');
   if (!body) return;
+  _prepareCalendarBodyForCalendarView(body);
   const _tk = _renderToken;
   const y = _currentDate.getFullYear();
   await _fetchEvents(`${y}-01-01`, `${y + 1}-01-01`);
@@ -1935,20 +2086,38 @@ function _wireAll(body) {
       // the day-detail pane up and down on every character.
       const alreadySet = calBody.style.getPropertyValue('--cal-detail-h');
       if (!alreadySet) {
-        const saved = parseInt(localStorage.getItem('odysseus.cal.detailH') || '0', 10);
-        if (saved && saved > 80) calBody.style.setProperty('--cal-detail-h', saved + 'px');
+        _restoreCalDetailHeight(calBody);
+      } else {
+        calBody._calDetailLayoutKey = _calDetailLayoutKey();
+        _setCalDetailHeight(calBody, parseInt(alreadySet, 10) || 0);
+      }
+      const clampDetail = () => {
+        if (calBody.classList.contains('cal-form-mode')) return;
+        const key = _calDetailLayoutKey();
+        if (calBody._calDetailLayoutKey && calBody._calDetailLayoutKey !== key) {
+          _restoreCalDetailHeight(calBody);
+          return;
+        }
+        calBody._calDetailLayoutKey = key;
+        const cur = parseInt(calBody.style.getPropertyValue('--cal-detail-h'), 10) || 0;
+        _setCalDetailHeight(calBody, cur || _calDetailBounds(calBody).def);
+      };
+      requestAnimationFrame(clampDetail);
+      if (!calBody._calDetailResizeObs && typeof ResizeObserver !== 'undefined') {
+        const obs = new ResizeObserver(() => requestAnimationFrame(clampDetail));
+        obs.observe(calBody);
+        const content = calBody.closest('.modal-content');
+        if (content) obs.observe(content);
+        calBody._calDetailResizeObs = obs;
       }
       let startY = 0, startH = 240, dragging = false;
       const onMove = (ev) => {
         if (!dragging) return;
         const y = ev.touches ? ev.touches[0].clientY : ev.clientY;
-        // Drag UP (smaller y) → bigger day-detail. Allow the pane to grow
-        // all the way to the top of the visible viewport so the user can
-        // hide the calendar entirely. We leave ~24px headroom so the
-        // splitter handle itself stays grabbable to drag back down.
-        const vh = (window.visualViewport?.height) || window.innerHeight;
-        const newH = Math.max(40, Math.min(vh - 24, startH + (startY - y)));
-        calBody.style.setProperty('--cal-detail-h', newH + 'px');
+        // Drag UP (smaller y) gives the day-detail more room, but keep
+        // enough space for the actual calendar grid so the dock never turns
+        // into a blank day-detail scroller.
+        _setCalDetailHeight(calBody, startH + (startY - y));
       };
       const onUp = () => {
         if (!dragging) return;
@@ -1960,7 +2129,7 @@ function _wireAll(body) {
         document.removeEventListener('touchend', onUp);
         const cur = calBody.style.getPropertyValue('--cal-detail-h');
         const px = parseInt(cur, 10);
-        if (px) { try { localStorage.setItem('odysseus.cal.detailH', String(px)); } catch {} }
+        if (px) _setCalDetailHeight(calBody, px, { persist: true });
       };
       const onDown = (ev) => {
         ev.preventDefault();
@@ -1981,8 +2150,7 @@ function _wireAll(body) {
       // pane to its CSS default height.
       let _lastTap = 0;
       const resetSplit = () => {
-        calBody.style.removeProperty('--cal-detail-h');
-        try { localStorage.removeItem('odysseus.cal.detailH'); } catch {}
+        _resetCalDetailHeight(calBody);
       };
       splitter.addEventListener('dblclick', resetSplit);
       splitter.addEventListener('touchend', () => {
@@ -2312,14 +2480,13 @@ function _wireAll(body) {
       if (window.innerWidth > 768) return;
       const calBody = document.getElementById('cal-body');
       if (!calBody) return;
-      const vh = (window.visualViewport?.height) || window.innerHeight;
-      const target = vh - 24;
+      const target = _calDetailBounds(calBody).max;
       // Skip if already expanded — every keystroke triggers a re-render
       // which re-focuses the input. Re-running this on each keystroke
       // would shove the layout around as the user types.
       const cur = parseInt(calBody.style.getPropertyValue('--cal-detail-h'), 10) || 0;
       if (cur >= target - 24) return;
-      calBody.style.setProperty('--cal-detail-h', target + 'px');
+      _setCalDetailHeight(calBody, target);
     });
   }
 
@@ -2797,6 +2964,7 @@ function _parseTitleTime(text) {
 function _showEventForm(existing, defaultDate, defaultEndDate) {
   const body = document.getElementById('cal-body');
   if (!body) return;
+  _prepareCalendarBodyForForm(body);
   const isEdit = !!existing;
   const ds = existing ? _localDateOf(existing.dtstart) : (defaultDate || _today());
   const de = existing && existing.dtend ? _localDateOf(existing.dtend) : (defaultEndDate || ds);
@@ -2857,9 +3025,9 @@ function _showEventForm(existing, defaultDate, defaultEndDate) {
       </div>
       <div class="cal-loc-row">
         <input type="text" id="cal-f-loc" placeholder="Location" value="${_e(existing?.location || '')}" class="cal-input" />
-        <a id="cal-f-loc-map" class="cal-loc-map" href="#" target="_blank" rel="noopener noreferrer" title="Open in Maps" aria-label="Open in Apple Maps" tabindex="-1">
+        <button type="button" id="cal-f-loc-map" class="cal-loc-map" title="Preview in Maps" aria-label="Preview location in Google Maps" tabindex="-1">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 1 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>
-        </a>
+        </button>
       </div>
       <select id="cal-f-rrule" class="cal-input">
         <option value="" ${!existing?.rrule ? 'selected' : ''}>Does not repeat</option>
@@ -3223,33 +3391,8 @@ function _showEventForm(existing, defaultDate, defaultEndDate) {
   // mode opens already expanded when there's any detail content to see.
   titleInput?.addEventListener('focus', () => setExpanded(true), { once: true });
 
-  // Live time parse: typing a time like "11pm" or "15:30" into the title
-  // updates the hero clock + start input on the fly. The same parser still
-  // runs again on submit, but doing it live makes the hero clock track
-  // intent immediately instead of jumping at save.
-  if (titleInput) {
-    titleInput.addEventListener('input', () => {
-      if (document.getElementById('cal-f-allday')?.checked) return;
-      const tt = _parseTitleTime(titleInput.value);
-      if (!tt) return;
-      const startEl = document.getElementById('cal-f-start');
-      const endEl = document.getElementById('cal-f-end');
-      const newStart = `${String(tt.h).padStart(2, '0')}:${String(tt.m).padStart(2, '0')}`;
-      if (!startEl || startEl.value === newStart) return;
-      const toMin = (v) => { const p = (v || '').split(':'); return p.length === 2 ? (+p[0]) * 60 + (+p[1]) : null; };
-      const s0 = toMin(startEl.value), e0 = toMin(endEl?.value);
-      const dur = (s0 != null && e0 != null && e0 > s0) ? e0 - s0 : 60;
-      startEl.value = newStart;
-      const endMin = (tt.h * 60 + tt.m + dur) % 1440;
-      if (endEl) endEl.value = `${String(Math.floor(endMin / 60)).padStart(2, '0')}:${String(endMin % 60).padStart(2, '0')}`;
-      startEl.dispatchEvent(new Event('input'));
-    });
-  }
-
-  // Location → Apple Maps. The pin button next to the input is enabled
-  // only when there's a non-empty location, and its href tracks the live
-  // input value. Apple's universal URL opens the native Maps app on
-  // iOS/macOS and falls back to a web view on everything else.
+  // Location → Odysseus map sheet backed by Google Maps. The pin button next
+  // to the input is enabled only when there's a non-empty location.
   const locInput = document.getElementById('cal-f-loc');
   const locMap = document.getElementById('cal-f-loc-map');
   const _syncLocMap = () => {
@@ -3257,16 +3400,21 @@ function _showEventForm(existing, defaultDate, defaultEndDate) {
     const v = (locInput?.value || '').trim();
     if (!v) {
       locMap.classList.add('is-disabled');
-      locMap.removeAttribute('href');
+      locMap.disabled = true;
       locMap.setAttribute('tabindex', '-1');
       locMap.setAttribute('aria-disabled', 'true');
     } else {
       locMap.classList.remove('is-disabled');
-      locMap.setAttribute('href', 'https://maps.apple.com/?q=' + encodeURIComponent(v));
+      locMap.disabled = false;
       locMap.setAttribute('tabindex', '0');
       locMap.removeAttribute('aria-disabled');
     }
   };
+  locMap?.addEventListener('click', (e) => {
+    e.preventDefault();
+    const v = (locInput?.value || '').trim();
+    if (v) _openLocationMapSheet(v);
+  });
   locInput?.addEventListener('input', _syncLocMap);
   _syncLocMap();
 
@@ -3433,7 +3581,308 @@ function _addMinutesToLocalIso(baseIso, addMinutes) {
 
 function _e(s) { return uiModule.esc ? uiModule.esc(s || '') : (s || '').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
 
-// Linkify a location string: URLs become clickable, plain addresses get a Maps link.
+const CAL_MAP_RECENT_KEY = 'odysseus.cal.map.recent';
+const CAL_MAP_TRAVEL_MODES = [
+  ['driving', 'Drive'],
+  ['walking', 'Walk'],
+  ['transit', 'Transit'],
+  ['bicycling', 'Bike'],
+];
+const CAL_MAP_NEARBY = [
+  ['parking', 'Parking'],
+  ['restaurants', 'Food'],
+  ['coffee', 'Coffee'],
+  ['gas stations', 'Gas'],
+  ['hotels', 'Hotels'],
+  ['pharmacies', 'Pharmacy'],
+  ['grocery stores', 'Grocery'],
+  ['attractions', 'Things to do'],
+];
+
+function _normalizeMapQuery(loc) {
+  return String(loc || '').replace(/\s+/g, ' ').trim();
+}
+
+function _clampMapZoom(zoom) {
+  const z = parseInt(zoom, 10);
+  if (!Number.isFinite(z)) return 15;
+  return Math.max(3, Math.min(20, z));
+}
+
+function _googleMapsSearchUrl(loc) {
+  const params = new URLSearchParams({ api: '1', query: _normalizeMapQuery(loc) });
+  return 'https://www.google.com/maps/search/?' + params.toString();
+}
+
+function _googleMapsDirectionsUrl(loc, travelMode = 'driving') {
+  const params = new URLSearchParams({ api: '1', destination: _normalizeMapQuery(loc) });
+  if (travelMode) params.set('travelmode', travelMode);
+  return 'https://www.google.com/maps/dir/?' + params.toString();
+}
+
+function _googleMapsEmbedUrl(loc, opts = {}) {
+  const params = new URLSearchParams({
+    q: _normalizeMapQuery(loc),
+    output: 'embed',
+    z: String(_clampMapZoom(opts.zoom)),
+  });
+  params.set('t', opts.mapType === 'satellite' ? 'k' : 'm');
+  return 'https://www.google.com/maps?' + params.toString();
+}
+
+function _openExternalMapUrl(url) {
+  const opened = window.open(url, '_blank', 'noopener,noreferrer');
+  if (!opened) window.location.href = url;
+}
+
+function _readRecentMapQueries() {
+  try {
+    const arr = JSON.parse(localStorage.getItem(CAL_MAP_RECENT_KEY) || '[]');
+    return Array.isArray(arr) ? arr.filter(Boolean).slice(0, 8) : [];
+  } catch {
+    return [];
+  }
+}
+
+function _rememberMapQuery(loc) {
+  const q = _normalizeMapQuery(loc);
+  if (!q) return;
+  const lower = q.toLowerCase();
+  const next = [q, ..._readRecentMapQueries().filter(x => String(x).toLowerCase() !== lower)].slice(0, 8);
+  try { localStorage.setItem(CAL_MAP_RECENT_KEY, JSON.stringify(next)); } catch {}
+}
+
+async function _copyMapText(text, okLabel) {
+  const value = String(text || '');
+  if (!value) return;
+  try {
+    await navigator.clipboard.writeText(value);
+    uiModule.showToast?.(okLabel || 'Copied');
+    return;
+  } catch {}
+  const ta = document.createElement('textarea');
+  ta.value = value;
+  ta.style.cssText = 'position:fixed;left:-9999px;top:-9999px;';
+  document.body.appendChild(ta);
+  ta.select();
+  let ok = false;
+  try { ok = document.execCommand('copy'); } catch {}
+  ta.remove();
+  uiModule.showToast?.(ok ? (okLabel || 'Copied') : 'Copy failed');
+}
+
+function _closeLocationMapSheet() {
+  document.getElementById('cal-map-sheet')?.remove();
+  if (window._calMapSheetEsc) {
+    document.removeEventListener('keydown', window._calMapSheetEsc);
+    window._calMapSheetEsc = null;
+  }
+}
+
+function _openLocationMapSheet(loc) {
+  const initialQuery = _normalizeMapQuery(loc);
+  if (!initialQuery) return;
+  _closeLocationMapSheet();
+
+  const state = {
+    query: initialQuery,
+    anchor: initialQuery,
+    zoom: 15,
+    mapType: 'map',
+    travelMode: 'driving',
+  };
+  _rememberMapQuery(initialQuery);
+
+  const overlay = document.createElement('div');
+  overlay.id = 'cal-map-sheet';
+  overlay.className = 'cal-map-sheet-overlay';
+  overlay.innerHTML = `
+    <div class="cal-map-sheet" role="dialog" aria-modal="true" aria-label="Map tools">
+      <div class="cal-map-grabber" aria-hidden="true"></div>
+      <div class="cal-map-head">
+        <div class="cal-map-title">
+          <span class="cal-map-kicker">Odysseus Maps</span>
+          <strong data-map-title>${_e(initialQuery)}</strong>
+        </div>
+        <button type="button" class="cal-map-close" aria-label="Close map tools">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+      <div class="cal-map-body">
+        <form class="cal-map-search" data-map-search>
+          <input class="cal-map-query" data-map-query type="search" value="${_e(initialQuery)}" autocomplete="off" spellcheck="false" aria-label="Map search" />
+          <button type="submit" class="cal-map-icon-btn" title="Preview" aria-label="Preview map">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+          </button>
+        </form>
+        <div class="cal-map-control-row">
+          <div class="cal-map-segment" aria-label="Preview type">
+            <button type="button" data-map-type="map" class="is-active">Map</button>
+            <button type="button" data-map-type="satellite">Satellite</button>
+          </div>
+          <div class="cal-map-zoom" aria-label="Preview zoom">
+            <button type="button" data-map-zoom="-1" aria-label="Zoom out">-</button>
+            <span data-map-zoom-label>15</span>
+            <button type="button" data-map-zoom="1" aria-label="Zoom in">+</button>
+          </div>
+        </div>
+        <div class="cal-map-frame-wrap">
+          <iframe class="cal-map-frame" src="${_googleMapsEmbedUrl(initialQuery, state)}" loading="lazy" referrerpolicy="no-referrer-when-downgrade" title="Google Maps preview for ${_e(initialQuery)}"></iframe>
+        </div>
+        <div class="cal-map-section">
+          <div class="cal-map-section-title">Directions</div>
+          <div class="cal-map-segment cal-map-mode-segment" aria-label="Travel mode">
+            ${CAL_MAP_TRAVEL_MODES.map(([value, label]) => `<button type="button" data-map-mode="${value}" class="${value === state.travelMode ? 'is-active' : ''}">${label}</button>`).join('')}
+          </div>
+        </div>
+        <div class="cal-map-section">
+          <div class="cal-map-section-head">
+            <div class="cal-map-section-title">Nearby</div>
+            <button type="button" class="cal-map-link-btn" data-map-action="reset-target">Reset</button>
+          </div>
+          <div class="cal-map-chip-row">
+            ${CAL_MAP_NEARBY.map(([value, label]) => `<button type="button" class="cal-map-chip" data-map-nearby="${value}">${label}</button>`).join('')}
+          </div>
+        </div>
+        <div class="cal-map-section cal-map-recent-section" data-map-recent-section>
+          <div class="cal-map-section-title">Recent</div>
+          <div class="cal-map-chip-row" data-map-recent></div>
+        </div>
+      </div>
+      <div class="cal-map-actions">
+        <button type="button" class="cal-map-btn cal-map-btn-primary" data-map-action="open">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3h7v7"/><path d="M10 14 21 3"/><path d="M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/></svg>
+          <span>Open</span>
+        </button>
+        <button type="button" class="cal-map-btn" data-map-action="directions">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11l19-9-9 19-2-8-8-2z"/></svg>
+          <span>Route</span>
+        </button>
+        <button type="button" class="cal-map-btn" data-map-action="use">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
+          <span>Use</span>
+        </button>
+        <button type="button" class="cal-map-btn" data-map-action="share">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="M8.6 10.7 15.4 6.3"/><path d="M8.6 13.3l6.8 4.4"/></svg>
+          <span>Share</span>
+        </button>
+        <button type="button" class="cal-map-btn" data-map-action="copy-link">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.1 0l2-2a5 5 0 0 0-7.1-7.1l-1.1 1.1"/><path d="M14 11a5 5 0 0 0-7.1 0l-2 2A5 5 0 0 0 12 20.1l1.1-1.1"/></svg>
+          <span>Link</span>
+        </button>
+        <button type="button" class="cal-map-btn" data-map-action="copy-text">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+          <span>Text</span>
+        </button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+
+  const frame = overlay.querySelector('.cal-map-frame');
+  const queryInput = overlay.querySelector('[data-map-query]');
+  const title = overlay.querySelector('[data-map-title]');
+  const zoomLabel = overlay.querySelector('[data-map-zoom-label]');
+  const recentSection = overlay.querySelector('[data-map-recent-section]');
+  const recentRow = overlay.querySelector('[data-map-recent]');
+
+  const renderRecent = () => {
+    const recent = _readRecentMapQueries().filter(q => q.toLowerCase() !== state.query.toLowerCase()).slice(0, 6);
+    if (!recent.length) {
+      if (recentSection) recentSection.hidden = true;
+      return;
+    }
+    if (recentSection) recentSection.hidden = false;
+    if (!recentRow) return;
+    recentRow.innerHTML = recent.map(q => `<button type="button" class="cal-map-chip" data-map-recent-query="${_e(q)}">${_e(q)}</button>`).join('');
+    recentRow.querySelectorAll('[data-map-recent-query]').forEach(btn => {
+      btn.addEventListener('click', () => setQuery(btn.dataset.mapRecentQuery, { updateAnchor: true }));
+    });
+  };
+
+  const refresh = () => {
+    if (title) title.textContent = state.query;
+    if (zoomLabel) zoomLabel.textContent = String(state.zoom);
+    if (frame) {
+      frame.src = _googleMapsEmbedUrl(state.query, { zoom: state.zoom, mapType: state.mapType });
+      frame.title = 'Google Maps preview for ' + state.query;
+    }
+    overlay.querySelectorAll('[data-map-type]').forEach(btn => btn.classList.toggle('is-active', btn.dataset.mapType === state.mapType));
+    overlay.querySelectorAll('[data-map-mode]').forEach(btn => btn.classList.toggle('is-active', btn.dataset.mapMode === state.travelMode));
+    renderRecent();
+  };
+
+  const setQuery = (next, { updateAnchor = true, remember = true } = {}) => {
+    const q = _normalizeMapQuery(next);
+    if (!q) return;
+    state.query = q;
+    if (updateAnchor) state.anchor = q;
+    if (queryInput) queryInput.value = q;
+    if (remember) _rememberMapQuery(q);
+    refresh();
+  };
+
+  const close = () => _closeLocationMapSheet();
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+  overlay.querySelector('.cal-map-close')?.addEventListener('click', close);
+  overlay.querySelector('[data-map-search]')?.addEventListener('submit', (e) => {
+    e.preventDefault();
+    setQuery(queryInput?.value, { updateAnchor: true });
+  });
+  overlay.querySelectorAll('[data-map-type]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      state.mapType = btn.dataset.mapType === 'satellite' ? 'satellite' : 'map';
+      refresh();
+    });
+  });
+  overlay.querySelectorAll('[data-map-zoom]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      state.zoom = _clampMapZoom(state.zoom + parseInt(btn.dataset.mapZoom || '0', 10));
+      refresh();
+    });
+  });
+  overlay.querySelectorAll('[data-map-mode]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      state.travelMode = btn.dataset.mapMode || 'driving';
+      refresh();
+    });
+  });
+  overlay.querySelectorAll('[data-map-nearby]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const nearby = btn.dataset.mapNearby || '';
+      setQuery(`${nearby} near ${state.anchor}`, { updateAnchor: false });
+    });
+  });
+  overlay.querySelector('[data-map-action="reset-target"]')?.addEventListener('click', () => setQuery(state.anchor, { updateAnchor: true, remember: false }));
+  overlay.querySelector('[data-map-action="open"]')?.addEventListener('click', () => _openExternalMapUrl(_googleMapsSearchUrl(state.query)));
+  overlay.querySelector('[data-map-action="directions"]')?.addEventListener('click', () => _openExternalMapUrl(_googleMapsDirectionsUrl(state.query, state.travelMode)));
+  overlay.querySelector('[data-map-action="use"]')?.addEventListener('click', () => {
+    const locInput = document.getElementById('cal-f-loc');
+    if (locInput) {
+      locInput.value = state.query;
+      locInput.dispatchEvent(new Event('input', { bubbles: true }));
+      uiModule.showToast?.('Location updated');
+    }
+    close();
+  });
+  overlay.querySelector('[data-map-action="share"]')?.addEventListener('click', async () => {
+    const url = _googleMapsSearchUrl(state.query);
+    if (navigator.share) {
+      try {
+        await navigator.share({ title: state.query, text: state.query, url });
+        return;
+      } catch {}
+    }
+    _copyMapText(url, 'Map link copied');
+  });
+  overlay.querySelector('[data-map-action="copy-link"]')?.addEventListener('click', () => _copyMapText(_googleMapsSearchUrl(state.query), 'Map link copied'));
+  overlay.querySelector('[data-map-action="copy-text"]')?.addEventListener('click', () => _copyMapText(state.query, 'Location copied'));
+  window._calMapSheetEsc = (e) => { if (e.key === 'Escape') close(); };
+  document.addEventListener('keydown', window._calMapSheetEsc);
+  refresh();
+}
+
+// Linkify a location string: URLs become clickable, plain addresses get a Google Maps link.
 function _locHTML(loc) {
   if (!loc) return '';
   const urlRe = /(https?:\/\/[^\s]+)/gi;
@@ -3443,9 +3892,9 @@ function _locHTML(loc) {
       return `<a href="${safe}" target="_blank" rel="noopener" onclick="event.stopPropagation();">${safe}</a>`;
     }).replace(/\n/g, '<br>');
   }
-  // No URL — link the whole thing to OpenStreetMap.
-  const mapUrl = 'https://www.openstreetmap.org/search?query=' + encodeURIComponent(loc);
-  return `<a href="${mapUrl}" target="_blank" rel="noopener" onclick="event.stopPropagation();" title="Open in OpenStreetMap">${_e(loc)}</a>`;
+  // No URL — link the whole thing to Google Maps.
+  const mapUrl = _googleMapsSearchUrl(loc);
+  return `<a href="${mapUrl}" target="_blank" rel="noopener" onclick="event.stopPropagation();" title="Open in Google Maps">${_e(loc)}</a>`;
 }
 
 // ── Open / Close ──
@@ -3499,6 +3948,7 @@ function openCalendar() {
     _content.style.animation = '';
     _content.style.opacity = '';
   }
+  _resetCalendarFreshWindowMode(modal);
   modal.style.display = 'flex';
   Modals.register('calendar-modal', {
     railBtnId: 'rail-calendar',

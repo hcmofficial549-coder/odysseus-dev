@@ -299,6 +299,24 @@ class TestProbeZaiCoding:
             assert model not in result, f"base-zai-only model {model} should not appear for coding endpoint"
 
 
+def test_endpoint_catalog_probe_keeps_non_chat_models(monkeypatch):
+    catalog = ["qwen-max", "qwen-image-plus", "text-embedding-v4", "tts-1"]
+    seen = {}
+
+    def fake_probe(base_url, api_key=None, timeout=5, include_non_chat=False):
+        seen["include_non_chat"] = include_non_chat
+        return catalog
+
+    monkeypatch.setattr(model_routes, "_probe_endpoint", fake_probe)
+
+    assert model_routes._probe_endpoint_for_model_type(
+        "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "key",
+        model_type="llm",
+    ) == catalog
+    assert seen["include_non_chat"] is True
+
+
 # ── _curate_models ──
 
 class TestCurateModels:
@@ -335,8 +353,10 @@ class TestCurateModels:
         assert extra == []
 
     def test_deepseek_curated(self):
-        models = ["deepseek-chat", "deepseek-reasoner", "deepseek-coder"]
+        models = ["deepseek-v4-flash", "deepseek-v4-pro", "deepseek-chat", "deepseek-reasoner", "deepseek-coder"]
         curated, extra = _curate_models(models, "deepseek")
+        assert "deepseek-v4-flash" in curated
+        assert "deepseek-v4-pro" in curated
         assert "deepseek-chat" in curated
         assert "deepseek-reasoner" in curated
         assert "deepseek-coder" in extra
@@ -674,7 +694,9 @@ def test_lmstudio_error_for_bare_host_port_probes_v1_models(monkeypatch):
     # (the OpenAI-compatible branch lands on /v1/models for LM Studio).
     # _is_ollama_native_url would otherwise match localhost+empty path and
     # route to /api/tags, masking the LM Studio URL we want to assert on.
-    monkeypatch.setattr("src.llm_core._is_ollama_native_url", lambda url: False)
+    # The package facade re-exports this private helper, but _detect_provider's
+    # globals live in the defining module after the llm_core package split.
+    monkeypatch.setattr("src.llm_core._core._is_ollama_native_url", lambda url: False)
     msg = model_routes._model_endpoint_error_message(
         "http://localhost:1234",
         {"error": "HTTP 200"},
@@ -688,6 +710,7 @@ def test_lmstudio_error_for_bare_host_port_probes_v1_models(monkeypatch):
 class TestDockerLoopbackRewrite:
     def test_rewrites_loopback_when_in_docker(self, monkeypatch):
         monkeypatch.setattr(model_routes, "_docker_host_gateway_reachable", lambda: True)
+        monkeypatch.setattr(model_routes, "_container_loopback_reachable", lambda base_url: False)
         assert (model_routes._rewrite_loopback_for_docker("http://localhost:1234/v1")
                 == "http://host.docker.internal:1234/v1")
         assert (model_routes._rewrite_loopback_for_docker("http://127.0.0.1:1234/v1")
@@ -921,6 +944,58 @@ def test_get_models_returns_pinned_when_probe_empty(monkeypatch):
     ids = [row["id"] for row in result]
     assert ids == ["deploy-1"]
     assert result[0]["is_pinned"] is True
+
+
+def test_unload_all_endpoint_models_uses_loaded_ollama_models(monkeypatch):
+    ep = _make_endpoint(
+        id="ollama-local",
+        name="Local Ollama",
+        base_url="http://localhost:11434/v1",
+    )
+    db = _PinnedFakeDb([ep])
+    calls = []
+    monkeypatch.setattr(model_routes, "SessionLocal", lambda: db)
+    monkeypatch.setattr(model_routes, "require_admin", lambda request: None)
+    monkeypatch.setattr(model_routes, "_supports_ollama_unload", lambda base_url: True)
+    monkeypatch.setattr(model_routes, "_ollama_loaded_models", lambda base_url, api_key: ["llama3.2", "qwen3"])
+
+    def fake_unload(base_url, api_key, model):
+        calls.append((base_url, model))
+        return {"ok": True, "provider": "ollama", "model": model}
+
+    monkeypatch.setattr(model_routes, "_ollama_unload_model", fake_unload)
+    endpoint = _get_route("/api/model-endpoints/unload-all", "POST")
+
+    response = SimpleNamespace(status_code=200)
+    result = asyncio.run(endpoint(_PinnedFakeRequest(), response))
+
+    assert response.status_code == 200
+    assert result["ok"] is True
+    assert result["supported"] is True
+    assert result["requested"] == 2
+    assert result["unloaded"] == 2
+    assert calls == [
+        ("http://localhost:11434/v1", "llama3.2"),
+        ("http://localhost:11434/v1", "qwen3"),
+    ]
+
+
+def test_unload_all_endpoint_models_reports_no_supported_runtime(monkeypatch):
+    ep = _make_endpoint(base_url="https://api.openai.com/v1")
+    db = _PinnedFakeDb([ep])
+    monkeypatch.setattr(model_routes, "SessionLocal", lambda: db)
+    monkeypatch.setattr(model_routes, "require_admin", lambda request: None)
+    monkeypatch.setattr(model_routes, "_supports_ollama_unload", lambda base_url: False)
+    endpoint = _get_route("/api/model-endpoints/unload-all", "POST")
+
+    response = SimpleNamespace(status_code=200)
+    result = asyncio.run(endpoint(_PinnedFakeRequest(), response))
+
+    assert response.status_code == 200
+    assert result["ok"] is True
+    assert result["supported"] is False
+    assert result["unloaded"] == 0
+    assert result["message"] == "No supported local model runtimes found."
 
 
 def test_reprobe_preserves_pinned_models(monkeypatch):
@@ -1509,7 +1584,7 @@ def test_background_refresh_deduplicates_same_base_url(monkeypatch):
     calls = []
     probe_done = threading.Event()
 
-    def fake_probe(base_url, api_key=None, timeout=2):
+    def fake_probe(base_url, api_key=None, timeout=2, include_non_chat=False):
         calls.append(base_url)
         probe_done.set()
         return ["live-model"]
@@ -1599,7 +1674,7 @@ def test_explicit_proxy_test_fetches_models_with_long_timeout(monkeypatch):
     calls = []
     returned = ["NVIDIA NIM/openai/gpt-oss-120b", "mistral/mistral-small-2603"]
 
-    def fake_probe(base_url, api_key=None, timeout=2):
+    def fake_probe(base_url, api_key=None, timeout=2, include_non_chat=False):
         calls.append({"base_url": base_url, "api_key": api_key, "timeout": timeout})
         return returned
 
@@ -1637,7 +1712,7 @@ def test_explicit_proxy_add_fetches_and_caches_models_with_long_timeout(monkeypa
     calls = []
     returned = ["NVIDIA NIM/openai/gpt-oss-120b", "mistral/mistral-small-2603"]
 
-    def fake_probe(base_url, api_key=None, timeout=2):
+    def fake_probe(base_url, api_key=None, timeout=2, include_non_chat=False):
         calls.append({"base_url": base_url, "api_key": api_key, "timeout": timeout})
         return returned
 
@@ -1693,7 +1768,7 @@ def test_manual_refresh_uses_long_timeout_and_saves_full_model_list(monkeypatch)
     calls = []
     refreshed = ["cached-model", "mistral/mistral-small-2603", "provider/nested/model/id"]
 
-    def fake_probe(base_url, api_key=None, timeout=2):
+    def fake_probe(base_url, api_key=None, timeout=2, include_non_chat=False):
         calls.append({"base_url": base_url, "api_key": api_key, "timeout": timeout})
         return refreshed
 
@@ -1737,7 +1812,7 @@ def test_manual_refresh_defaults_to_proxy_long_timeout(monkeypatch):
 
     timeouts = []
 
-    def fake_probe(base_url, api_key=None, timeout=2):
+    def fake_probe(base_url, api_key=None, timeout=2, include_non_chat=False):
         timeouts.append(timeout)
         return ["cached-model", "new-model"]
 
@@ -1771,7 +1846,7 @@ def test_manual_refresh_timeout_keeps_cached_models_and_warns(monkeypatch):
     monkeypatch.setattr(model_routes, "SessionLocal", lambda: db)
     monkeypatch.setattr(model_routes, "require_admin", lambda request: None)
 
-    def fake_probe(base_url, api_key=None, timeout=2):
+    def fake_probe(base_url, api_key=None, timeout=2, include_non_chat=False):
         raise httpx.TimeoutException("timed out")
 
     monkeypatch.setattr(model_routes, "_probe_endpoint", fake_probe)

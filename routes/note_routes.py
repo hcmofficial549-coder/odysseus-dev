@@ -13,6 +13,7 @@ from core.database import SessionLocal, Note
 from core.middleware import INTERNAL_TOOL_USER
 from src.auth_helpers import require_user
 from src.constants import DATA_DIR
+from src.upload_handler import reserve_upload_references
 from sqlalchemy.orm.attributes import flag_modified
 
 logger = logging.getLogger(__name__)
@@ -95,6 +96,13 @@ def _note_to_dict(note: Note) -> Dict[str, Any]:
         "created_at": note.created_at.isoformat() if note.created_at else None,
         "updated_at": note.updated_at.isoformat() if note.updated_at else None,
     }
+
+
+def _field_provided(model: BaseModel, field: str) -> bool:
+    fields_set = getattr(model, "model_fields_set", None)
+    if fields_set is None:
+        fields_set = getattr(model, "__fields_set__", set())
+    return field in fields_set
 
 
 def _reminder_text_from_note(note: Note) -> tuple[str, str]:
@@ -300,7 +308,7 @@ async def dispatch_reminder(
     email_error = ""
     if channel == "email":
         try:
-            from routes.email_routes import _get_email_config
+            from routes.email import _get_email_config
             from email.mime.text import MIMEText
             from email.mime.multipart import MIMEMultipart
             from datetime import datetime as _dt
@@ -572,7 +580,7 @@ async def dispatch_reminder(
 # Router factory
 # ---------------------------------------------------------------------------
 
-def setup_note_routes(task_scheduler=None):
+def setup_note_routes(task_scheduler=None, upload_handler=None):
     # Expose the scheduler to module-level `dispatch_reminder` so reminders
     # can also push to the in-app notification queue (the polling system
     # turns each entry into a real browser Notification + the existing
@@ -593,6 +601,11 @@ def setup_note_routes(task_scheduler=None):
         # path. fire_reminder below already gated this way; the CRUD routes
         # did not.
         return require_user(request) or None
+
+    def _reserve_note_uploads(owner: Optional[str], *values) -> None:
+        missing_id = reserve_upload_references(upload_handler, owner, *values)
+        if missing_id:
+            raise HTTPException(409, f"Referenced upload is no longer available: {missing_id}")
 
     def _is_admin_or_single_user(request: Request, user: str | None) -> bool:
         if user == INTERNAL_TOOL_USER:
@@ -643,6 +656,13 @@ def setup_note_routes(task_scheduler=None):
     @router.post("")
     def create_note(request: Request, body: NoteCreate):
         user = _owner(request)
+        _reserve_note_uploads(
+            user,
+            body.image_url,
+            body.color,
+            body.content,
+            json.dumps(body.items) if body.items is not None else None,
+        )
         db = SessionLocal()
         try:
             note = Note(
@@ -700,32 +720,39 @@ def setup_note_routes(task_scheduler=None):
             if user is not None and note.owner != user:
                 raise HTTPException(404, "Note not found")
 
-            if body.title is not None:
-                note.title = body.title
-            if body.content is not None:
+            _reserve_note_uploads(
+                user,
+                body.image_url,
+                body.color,
+                body.content,
+                json.dumps(body.items) if body.items is not None else None,
+            )
+            if _field_provided(body, "title"):
+                note.title = body.title or ""
+            if _field_provided(body, "content"):
                 note.content = body.content
-            if body.items is not None:
-                note.items = json.dumps(body.items)
+            if _field_provided(body, "items"):
+                note.items = json.dumps(body.items) if body.items is not None else None
                 flag_modified(note, "items")
-            if body.note_type is not None:
+            if _field_provided(body, "note_type") and body.note_type is not None:
                 note.note_type = body.note_type
-            if body.color is not None:
+            if _field_provided(body, "color"):
                 note.color = body.color
-            if body.label is not None:
+            if _field_provided(body, "label"):
                 note.label = body.label
-            if body.pinned is not None:
+            if _field_provided(body, "pinned") and body.pinned is not None:
                 note.pinned = body.pinned
-            if body.archived is not None:
+            if _field_provided(body, "archived") and body.archived is not None:
                 note.archived = body.archived
-            if body.due_date is not None:
+            if _field_provided(body, "due_date"):
                 note.due_date = body.due_date
-            if body.image_url is not None:
+            if _field_provided(body, "image_url"):
                 note.image_url = body.image_url
-            if body.repeat is not None:
-                note.repeat = body.repeat
-            if body.sort_order is not None:
+            if _field_provided(body, "repeat"):
+                note.repeat = body.repeat or "none"
+            if _field_provided(body, "sort_order") and body.sort_order is not None:
                 note.sort_order = body.sort_order
-            if body.agent_session_id is not None:
+            if _field_provided(body, "agent_session_id"):
                 note.agent_session_id = body.agent_session_id
 
             db.commit()

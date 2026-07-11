@@ -109,7 +109,7 @@ def test_local_minimax_mlx_payload_gets_stability_defaults(monkeypatch):
 
 
 def test_chatgpt_subscription_payload_omits_max_output_tokens():
-    # ChatGPT Subscription Codex API does not support max_output_tokens —
+    # Codex Subscription API does not support max_output_tokens —
     # passing it returns HTTP 400 "Unsupported parameter: max_output_tokens".
     # The payload should NOT include max_output_tokens regardless of max_tokens.
     payload = llm_core._build_chatgpt_responses_payload(
@@ -131,3 +131,51 @@ def test_chatgpt_subscription_payload_omits_max_output_tokens_when_zero():
     )
 
     assert "max_output_tokens" not in payload
+
+
+def test_chatgpt_subscription_payload_preserves_user_image_blocks():
+    payload = llm_core._build_chatgpt_responses_payload(
+        "gpt-5.4-mini",
+        [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "can you see this image?"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+            ],
+        }],
+        temperature=0.2,
+        max_tokens=37,
+    )
+
+    content = payload["input"][0]["content"]
+    assert content == [
+        {"type": "input_text", "text": "can you see this image?"},
+        {"type": "input_image", "image_url": "data:image/png;base64,AAAA"},
+    ]
+
+
+def _anthropic_payload(temperature):
+    return llm_core._build_anthropic_payload(
+        "claude-3-5-sonnet",
+        [{"role": "user", "content": "Hi"}],
+        temperature,
+        max_tokens=5,
+    )
+
+
+def test_anthropic_payload_clamps_above_one():
+    # Anthropic rejects temperature > 1.0 (e.g. the Nietzsche preset's 1.2).
+    assert _anthropic_payload(1.2)["temperature"] == 1.0
+
+
+def test_anthropic_payload_keeps_in_range():
+    assert _anthropic_payload(0.7)["temperature"] == 0.7
+
+
+def test_anthropic_payload_clamps_negative():
+    assert _anthropic_payload(-0.5)["temperature"] == 0.0
+
+
+def test_anthropic_payload_none_temperature_does_not_crash():
+    payload = _anthropic_payload(None)
+    assert payload["temperature"] is None

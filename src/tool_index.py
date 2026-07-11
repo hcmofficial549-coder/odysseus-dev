@@ -72,6 +72,7 @@ BUILTIN_TOOL_DESCRIPTIONS: Dict[str, str] = {
     "web_search": "Quick single web lookup for a fact, current event, latest/current information, or doc mid-task. Use this instead of bash/curl/python/requests for web searches. NOT for 'research X' / 'do research on X' requests — those are deep-research jobs (use trigger_research). web_search = one query; trigger_research = a full researched report in the sidebar.",
     "web_fetch": "Fetch and read the text content of a specific URL/website the user names (e.g. 'check example.com', 'open this link'). Use when you have a concrete URL; for open-ended lookups use web_search instead.",
     "read_file": "Read a file from disk and return its contents. View source code, config files, logs. Supports an optional line range (offset/limit) for large files.",
+    "read_attachment": "Read a current or historical chat attachment by its upload id or odysseus://attachment URI. Owner-checked and path-free; use this instead of read_file for files listed in the chat attachment manifest.",
     "grep": "Search file CONTENTS for a regex across a directory tree (ripgrep-backed, honours .gitignore). Returns file:line:match. Use to find where code/symbols/strings live — prefer over bash grep.",
     "glob": "Find FILES by glob pattern (e.g. '**/*.py'), newest first. Use to locate files by name/extension — prefer over bash find/ls.",
     "ls": "List a directory's entries (folders then files with sizes). Use to see what's in a folder — prefer over bash ls.",
@@ -82,7 +83,10 @@ BUILTIN_TOOL_DESCRIPTIONS: Dict[str, str] = {
     "edit_document": "Preferred tool for editing an existing document — targeted find-and-replace. Use for any small change: add a function, fix a bug, tweak a section, rename things.",
     "update_document": "Replace the entire active document content. ONLY for full rewrites (>50% changed). Do not use for small edits — use edit_document instead.",
     "suggest_document": "Suggest changes to the active document with explanations. For code review, proofreading, feedback requests.",
-    "generate_image": "Generate an AI image from a text prompt. Specify model, size, and quality. Art, illustrations, photos.",
+    "generate_image": "Generate a professional AI image file from a text prompt and render it inline when an image-generation tool/model is explicitly selected or invoked. Supports size, aspect ratio, style, quality, seed, product shots, posters, ads, portraits, concept art.",
+    "generate_video": "Generate a professional AI video from a prompt when a video-generation tool/model is explicitly selected or invoked. Supports cinematic camera direction, social clips, ad creative, animations, image-to-video, lip-sync/audio-driven clips, and premium tiers.",
+    "generate_music": "Generate professional AI music or audio when an audio-generation tool/backend is explicitly selected or invoked. Supports songs, instrumentals, jingles, background music, seamless loops, vocals, lyrics, BPM, polished mix/master.",
+    "runcomfy_media": "Run any exact media backend endpoint from a skill model_id/input body or local ComfyUI workflow. Use provider=comfyui for the free local route and provider=runcomfy for paid RunComfy Cloud schemas.",
     "chat_with_model": "Send a message to a different AI model. Compare responses, get specialized help, delegate tasks.",
     "ask_teacher": "Ask a more capable model for help with a difficult problem. Escalate complex tasks.",
     "pipeline": "Run a multi-step AI pipeline with multiple models. Chain tasks together in sequence.",
@@ -96,7 +100,7 @@ BUILTIN_TOOL_DESCRIPTIONS: Dict[str, str] = {
     "manage_webhooks": "Webhook management: list, add, delete, enable, or disable webhooks.",
     "api_call": "Call a configured API integration by name (Home Assistant, Miniflux, Gitea, Linkding, Jellyfin, RSS reader, git forge, bookmark manager, smart home, or any other registered service). Make a GET/POST/PUT/PATCH/DELETE request to the integration's endpoint path, with an optional JSON body. Use whenever the user asks to query or control one of their connected integrations/services.",
     "manage_tokens": "API token management: list, create, or delete API access tokens.",
-    "manage_documents": "List, read, delete, or tidy documents in the editor panel. action='list' returns clickable rows (most-recent first) so the user can open any doc by clicking. action='read' (aka view/open/get) with document_id returns the content; supports offset=<N> + limit=<N> to page through large docs (response includes next_offset when more remains, so you can keep calling with offset=next_offset). action='delete' with document_id removes a doc (only way to delete). Use this for ANY 'show/read/list/open my documents/docs/files/notes' request — never shell or curl.",
+    "manage_documents": "List, read, delete, or tidy documents in the in-app editor Documents/Library panel. action='list' returns clickable rows (most-recent first) so the user can open any editor doc by clicking. action='read' (aka view/open/get) with document_id returns the content. action='delete' with document_id removes a doc. Do NOT use for workspace/project/repo/disk files, source code, folders, or the Notes app; use workspace file tools or manage_notes for those.",
     "manage_research": "List, read/open, or delete saved DEEP RESEARCH results from the Library. action='list' returns clickable [query](#research-<id>) rows (most-recent first). action='read' (aka open/view/get) with id returns the report + sources. action='delete' with id removes it. Use this for ANY 'open/read/find/delete my research / that report / the research on X' request. NOTE: this is for EXISTING research; to START new research use trigger_research.",
     "manage_settings": "Change ANY real app setting (the ones the Settings panel writes) so the user never has to open it: TTS voice/provider/speed, STT, search engine + result count, default/teacher/task/utility/vision/image/research models, image quality, reminder channel (browser/email/ntfy), agent timeout/tool-call budget, and more. action=set with key (friendly aliases ok: voice, 'search engine', 'default model', 'teacher model', 'image quality', 'reminder channel'...) + value; get/list/reset too. Also toggles tools on/off (disable_tool/enable_tool/list_tools). Secrets/API keys are read-only. Use for any 'change my…/set my…/use X for…/turn on…' preference request.",
     "create_session": "Create a new chat with a name and model.",
@@ -105,7 +109,7 @@ BUILTIN_TOOL_DESCRIPTIONS: Dict[str, str] = {
     "search_chats": "Search past session transcripts across chats.",
     "ask_user": "Ask the user a multiple-choice question to get a decision or clarification. Use this when the task is genuinely ambiguous and the answer changes what you do next — pick between approaches, confirm an assumption, choose among options — instead of guessing. Provide a clear `question` and 2-6 `options` (each with a short `label`, optional `description`). Omit `multi`/keep it false unless the question explicitly permits choosing multiple options. Calling this ENDS your turn: the user sees clickable buttons and their choice arrives as your next message. Don't use it for things you can decide from context or sensible defaults, or for irreversible-action confirmation if a dedicated flow exists.",
     "update_plan": "Write back to the ACTIVE PLAN while executing an approved plan: mark steps done or revise them. After finishing a step call this with the full checklist and that step marked done; when the user asks to change the plan call it with the revised checklist. Always pass the COMPLETE markdown checklist (`- [ ]` / `- [x]`), not a diff. The user's docked plan window updates live. No effect when there is no active plan.",
-    "ui_control": "Control the UI and toggle tools on/off. Use this to turn off / turn on / disable / enable individual tools and features: shell (bash), search (web), research, browser, documents, incognito. Open panels (documents library, gallery, email inbox, sessions, notes, memories/brain, skills, settings, cookbook) via `open_panel <name>`. Use `open_email_reply <uid> <folder> reply <body text>` (or structured body) to open an email reply draft document without sending. USE THIS whenever the user says to write/draft a reply or tells you what to say — opening an empty draft or sending immediately is wrong. Body can continue on subsequent lines for multi-line replies. Also switches between chat/agent modes, changes the current model, and applies/creates themes.",
+    "ui_control": "Control the UI and toggle tools on/off. Use this to turn off / turn on / disable / enable individual tools and features: shell (bash), search (web), research, browser, documents, incognito. Open panels (documents library, gallery, email inbox, sessions, notes, calendar, tasks, research, workspace, memories/brain, skills, settings, cookbook) via `open_panel <name>`. Use `open_email_reply <uid> <folder> reply` to open an email reply draft document without sending. Also switches between chat/agent modes, changes the current model, and applies/creates themes.",
     "list_email_accounts": "List configured email accounts and default status. Use before reading or sending mail when the user mentions Gmail, work mail, custom domain mail, another mailbox, or asks to compare/check multiple inboxes.",
     "list_emails": "List emails for a folder/account, newest first, including read messages by default. Shows subject, sender, date, UID, account, and AI summary. Check inbox, find emails needing replies. Supports account from list_email_accounts for Gmail/work/custom mailboxes. For last/latest/newest email, use max_results=1 and unread_only=false.",
     "read_email": "Read the full content of a specific email by UID or Message-ID. View email body, check details. Supports account from list_email_accounts when the UID belongs to a non-default mailbox.",
@@ -133,7 +137,8 @@ BUILTIN_TOOL_DESCRIPTIONS: Dict[str, str] = {
     "adopt_served_model": "Register an existing tmux model server (one started manually or outside the cookbook flow) into Cookbook tracking AND add it as a chat endpoint. Use when the user (or a previous turn) launched something via ssh+tmux and now wants it visible in the UI, stoppable via stop_served_model, and usable in the model picker.",
     "list_cookbook_servers": "List the cookbook's configured servers (remote GPU boxes + local) and which is the current default. Use this BEFORE download_model/serve_model when the user didn't name a host — to decide where to run, or to ask the user which server when ambiguous. Downloads/serves default to the cookbook's selected server, NOT localhost.",
     "app_api": "Generic loopback to allowed Odysseus internal endpoints. Use this when the user wants something the UI can do but there's no named tool for it. Covers calendar, gallery, library/documents, memory, notes, tasks, settings, research, compare, cookbook GPUs/state — allowed UI buttons hit /api/* endpoints and you can hit them too. Sensitive auth/user/admin/shell paths and host-control Cookbook mutation routes are blocked; do NOT use app_api for shell commands, package installs, engine rebuilds, or PID signalling. Use named command tooling for shell commands. action='endpoints' with filter=<keyword> lists available endpoints. action='call' takes method+path+body. Hits same routes the UI uses — auth flows free. NOTE: themes are NOT an API endpoint — use the ui_control tool (create_theme / set_theme), not app_api. SESSIONS/CHATS: do NOT use app_api for these — GET /api/sessions returns EMPTY for tool calls (it's owner-filtered and tool calls authenticate as a different identity). EMAIL ACCOUNTS: do NOT use /api/email/accounts via app_api; use list_email_accounts, list_emails, and read_email instead. To list/rename/archive/delete/fork chats use the list_sessions and manage_session tools instead.",
-    "edit_image": "Edit an image in the gallery: upscale (increase resolution), remove background (rembg), inpaint (fill selected area), or harmonize (blend edits). Specify image ID and action.",
+    "manage_gallery": "List, search, get metadata for, and describe saved Gallery images/photos. Use when the user asks if you can see their gallery, wants to use a gallery image, asks what photos/images are saved, wants an image_id, or wants a vision description of a saved image. Returns clickable #image links.",
+    "edit_image": "Edit a saved image in the gallery and save the edited copy back to Gallery: sharpen locally, denoise, upscale, remove background/rembg, inpaint with a mask, harmonize/img2img, or enhance a face. Specify image ID and action. Use manage_gallery first if you need to find the image.",
     "trigger_research": "Start a deep research job on any topic — appears in the Deep Research sidebar, streams progress, produces a detailed report. Use for 'research X', 'look into Y', 'do deep research on Z', 'investigate'. NOT a scheduled task — it runs now and surfaces in the sidebar.",
     "manage_bg_jobs": "Inspect and control detached background `bash` jobs (the ones started with a `#!bg` marker). action='list' shows this chat's jobs (id/status/age/command); action='output' returns a job's captured output so far (check on a long-running job, or re-read a finished one); action='kill' stops a runaway job by id. Use for 'is the background job done', 'check on that job', 'show the build output', 'kill the background job', 'stop the bg task'. output/kill need a job_id from list.",
 }
@@ -339,6 +344,19 @@ class ToolIndex:
         r"https?://|www\.|\b(?:visit|open|fetch|check|read)\s+(?:this\s+)?(?:url|link|site|website|page)\b",
         re.I,
     )
+    _FILE_ARTIFACT_RE = re.compile(
+        r"(?:[A-Za-z]:[\\/][^\s`'\"<>]+|(?:\.{1,2}[\\/]|~[\\/]|/)[^\s`'\"<>]+|"
+        r"(?:[\w.-]+[\\/])+[^\s`'\"<>]+|"
+        r"\b[\w.-]+\.(?:py|pyw|js|mjs|cjs|ts|tsx|jsx|java|kt|kts|xml|json|jsonc|toml|"
+        r"ya?ml|txt|md|css|scss|html?|gradle|properties|lock|sh|bash|ps1|bat|cmd|"
+        r"sql|rs|go|c|cc|cpp|h|hpp|cs|rb|php|lua)\b)",
+        re.I,
+    )
+    _EXPLICIT_WORKSPACE_TOOL_RE = re.compile(
+        r"\b(?:get[_\s-]?workspace|read[_\s-]?file|write[_\s-]?file|edit[_\s-]?file|"
+        r"grep|glob|ls)\b",
+        re.I,
+    )
 
     # Keyword hints: if the query mentions these words, force-include the tools.
     _KEYWORD_HINTS = {
@@ -348,16 +366,17 @@ class ToolIndex:
         # believed it had only email tools and refused web/other tasks (#1707).
         frozenset({"email", "emails", "mail", "mails", "gmail", "googlemail", "message", "messages", "send", "reply", "replies", "inbox", "unread"}):
             {"list_email_accounts", "list_emails", "read_email", "send_email", "reply_to_email", "bulk_email", "delete_email", "archive_email", "mark_email_read", "resolve_contact", "ui_control"},
-        frozenset({"calendar", "event", "meeting", "schedule", "appointment"}):
-            {"manage_calendar"},
-        # Detached background `bash` jobs (#!bg): check on / read output / kill.
-        frozenset({"background job", "background jobs", "bg job", "bg jobs",
-                   "background task", "is the job done", "check the job",
-                   "check on that job", "job output", "kill the job",
-                   "kill the background", "stop the background", "running job"}):
-            {"manage_bg_jobs"},
+        frozenset({"calendar", "calendars", "calander", "calanders", "calender",
+                   "calenders", "my calendar", "my calander", "agenda", "event",
+                   "events", "meeting", "meetings", "schedule", "appointment",
+                   "appointments", "open calendar", "show calendar",
+                   "can you see my calendar", "can you see my calander"}):
+            {"manage_calendar", "ui_control"},
         frozenset({"note", "todo", "reminder", "remind", "checklist", "remember to"}):
             {"manage_notes"},
+        frozenset({"attachment", "attachments", "uploaded file", "uploaded image",
+                   "earlier upload", "previous file", "prior attachment"}):
+            {"read_attachment"},
         # Chat/session management. "rename" alone maps to documents below, so a
         # request like "rename the last 12 sessions/chats" needs these session
         # keywords to surface the right tools (NOT app_api — /api/sessions is
@@ -374,8 +393,10 @@ class ToolIndex:
                    "daily task", "background task", "scheduled task", "schedule a",
                    "automatically", "auto-summarize", "auto summarize",
                    "cron", "periodically", "on a schedule", "set up a task",
-                   "create a task", "summarize my inbox every", "remind me every"}):
-            {"manage_tasks"},
+                   "create a task", "summarize my inbox every", "remind me every",
+                   "tasks", "my tasks", "open tasks", "show tasks", "automations",
+                   "open automations", "can you see my tasks"}):
+            {"manage_tasks", "ui_control"},
         frozenset({"contact", "address", "phone", "who is"}):
             {"resolve_contact", "manage_contact"},
         frozenset({"save contact", "add contact", "new contact", "update contact",
@@ -437,24 +458,52 @@ class ToolIndex:
                    "read research", "find research", "delete research",
                    "remove research", "list research", "my reports", "the report",
                    "saved research", "research library", "past research",
-                   "research i did", "research about"}):
-            {"manage_research", "trigger_research"},
-        # Document edit/update intent
-        frozenset({"edit", "change", "fix", "rewrite", "update",
-                   "replace", "add a", "tweak", "modify", "rename", "paragraph",
-                   "section", "line", "the doc", "the docs", "the document", "the documents", "in the doc", "in the docs", "in document"}):
+                   "research i did", "research about", "show research",
+                   "can you see my research"}):
+            {"manage_research", "trigger_research", "ui_control"},
+        frozenset({"runcomfy", "run comfy", "skills.sh media", "ai video generation",
+                   "ai image generation", "ai music", "lip sync", "avatar video"}):
+            {"runcomfy_media"},
+        # Gallery / saved photo access and edits.
+        frozenset({"gallery", "my gallery", "photo", "photos", "image", "images",
+                   "picture", "pictures", "camera roll", "uploaded photo",
+                   "uploaded image", "saved image", "saved photo", "can you see my gallery",
+                   "see my photos", "describe this photo", "describe my photo",
+                   "edit photo", "edit image", "remove background", "upscale image",
+                   "sharpen image", "enhance face", "inpaint"}):
+            {"manage_gallery", "edit_image", "ui_control"},
+        # Document edit/update intent. Keep this scoped to editor documents;
+        # generic "fix/edit/change" belongs to files when the user says
+        # workspace/project/code/repo/file.
+        frozenset({"paragraph", "section", "the doc", "the docs",
+                   "the document", "the documents", "in the doc", "in the docs",
+                   "in document", "in the document", "doc text", "document text"}):
             {"edit_document", "update_document", "create_document", "suggest_document"},
-        # Document deletion / management — include generic open/find/read/show
-        # verbs + file/doc synonyms so "open my <X>", "find the <X>", "delete
-        # <X>" reach manage_documents even without the literal word "document".
+        # Document deletion / management. This is ONLY the in-app editor
+        # Documents/Library surface, not the workspace/filesystem or Notes app.
         frozenset({"delete this doc", "delete the doc", "delete document",
                    "remove document", "remove the doc", "trash", "list document", "list documents",
-                   "list doc", "list docs", "all my docs", "my document", "my documents", "my doc", "my docs", "my files",
-                   "open the", "open my", "open document", "open doc", "find the",
-                   "find my", "find document", "read the", "read my", "show me the",
-                   "show my", "the file", "my file", "the report", "the write-up",
-                   "the writeup", "saved document", "in my library", "in the library"}):
-            {"manage_documents", "edit_document"},
+                   "list doc", "list docs", "all my docs", "my document", "my documents",
+                   "my doc", "my docs", "open document", "open doc", "find document",
+                   "read document", "show documents", "show my documents", "what documents",
+                   "the report", "the write-up", "the writeup", "saved document",
+                   "in my library", "in the library", "document library", "doc library"}):
+            {"manage_documents", "edit_document", "ui_control"},
+        frozenset({"workspace", "workspaces", "open workspace", "show workspace",
+                   "browse workspace", "my workspace", "file tree", "folder tree",
+                   "project files", "open files", "show files", "open folders",
+                   "show folders", "can you see my workspace", "my files", "the file",
+                   "my file", "read file", "read files", "search files", "find files",
+                   "grep", "project", "repo", "repository", "codebase", "source tree",
+                   "source files", "directory", "directories"}):
+            {"get_workspace", "ls", "glob", "grep", "read_file", "write_file", "edit_file", "ui_control"},
+        frozenset({"skills", "skill", "my skills", "open skills", "show skills",
+                   "can you see my skills"}):
+            {"manage_skills", "ui_control"},
+        frozenset({"memory", "memories", "brain", "my memory", "my memories",
+                   "open memory", "open memories", "show memory", "show memories",
+                   "can you see my memory", "can you see my memories"}):
+            {"manage_memory", "ui_control"},
         # Theme / UI control intent
         frozenset({"theme", "color scheme", "colors of the ui", "make it dark",
                    "make it light", "make the ui", "switch theme", "change theme",
@@ -497,9 +546,12 @@ class ToolIndex:
                    "research off", "research on", "incognito",
                    "switch model", "change model", "set mode", "agent mode", "chat mode",
                    "open library", "open documents", "open gallery", "open email",
-                   "open inbox", "open settings", "open memories", "open memory",
+                   "open inbox", "open calendar", "open calander", "open calender",
+                   "open tasks", "open automations", "open research", "open workspace",
+                   "open settings", "open memories", "open memory",
                    "open skills", "open notes", "open chats", "open sessions",
                    "show library", "show gallery", "show inbox", "show settings",
+                   "show calendar", "show tasks", "show research", "show workspace",
                    "show memory", "show memories", "show skills", "show notes",
                    "show chats", "show sessions", "show documents"}):
             {"ui_control"},
@@ -537,53 +589,10 @@ class ToolIndex:
         # prompts do not drag web schemas into the agent context.
         if self._WEB_RE.search(query):
             base.update({"web_search", "web_fetch"})
-        # Hard steering: when the query is a clear "save info about a specific
-        # person" pattern (address paste + name, phone next to a name, etc.),
-        # the model has been observed defaulting to manage_memory even with
-        # manage_contact in the toolset. Pull memory out for these queries so
-        # the model literally cannot pick it. ALWAYS_AVAILABLE includes
-        # manage_memory by default; we override that here.
-        # The "for/to <word>" check needs to allow lowercase names (users
-        # don't always capitalize) but filter out timing/pronoun stopwords
-        # so "save this for later" / "save for tomorrow" don't trigger.
-        _CONTACT_STOPWORDS_AFTER_FOR = {
-            "later", "tomorrow", "yesterday", "now", "then", "today",
-            "tonight", "me", "us", "you", "him", "her", "them", "myself",
-            "yourself", "next", "this", "that", "the", "a", "an", "future",
-            "real", "use", "uses", "another", "future", "reference",
-        }
-        # Regex catches "save (this|it|the|her|...|<noun>) for <name>" / "to my
-        # contacts" patterns. More forgiving than literal-keyword matching —
-        # 'save this address for Alex' uses one extra word between 'save' and
-        # 'for' that breaks the contiguous 'save this for' phrase.
-        save_for_match = re.search(
-            r"\bsave\b(?:\s+\w+){0,3}\s+(?:for|to)\s+([A-Za-z]+)",
-            ql,
-        )
-        # "to my contacts", "into my contacts", "in my address book", etc.
-        to_contacts = re.search(r"\b(?:to|in|into)\s+(?:my\s+)?(?:contacts|address\s+book)\b", ql)
-        # Possessive: "save (his|her|their) (address|phone|email|number) ..."
-        # — strong contact signal even without "for <name>". Force-include
-        # manage_contact here too since the keyword fallback misses this
-        # construction.
-        possessive_contact = re.search(
-            r"\bsave\b(?:\s+\w+){0,2}\s+(?:his|her|their)\s+(?:address|phone|number|email|contact|details)",
-            ql,
-        )
-        word_after = (
-            save_for_match.group(1).lower() if save_for_match else None
-        )
-        contact_only_signal = (
-            (save_for_match is not None
-             and word_after is not None
-             and word_after not in _CONTACT_STOPWORDS_AFTER_FOR)
-            or to_contacts is not None
-            or possessive_contact is not None
-        )
-        if possessive_contact is not None:
-            base.add("manage_contact")
-        if contact_only_signal and "manage_contact" in base:
-            base.discard("manage_memory")
+        # Bare source filenames and relative paths are workspace-file requests
+        # even when the user does not literally say "workspace" or "file".
+        if self._FILE_ARTIFACT_RE.search(query) or self._EXPLICIT_WORKSPACE_TOOL_RE.search(query):
+            base.update({"get_workspace", "ls", "glob", "grep", "read_file", "write_file", "edit_file", "ui_control"})
         return base
 
 

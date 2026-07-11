@@ -18,6 +18,70 @@ let _authPolicy = { password_min_length: 8, reserved_usernames: [] };
 function el(id) { return document.getElementById(id); }
 function esc(s) { return uiModule.esc(s); }
 
+function wireAdminSectionToggles() {
+  if (document._admSectionToggleWired) return;
+  document._admSectionToggleWired = true;
+  const toggleSection = (head) => {
+    const section = head && head.closest('.adm-add-section.collapsible');
+    if (!section) return;
+    const expanded = section.classList.toggle('collapsed') === false;
+    head.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+  };
+  document.addEventListener('click', (e) => {
+    const head = e.target.closest('.adm-section-toggle');
+    if (!head) return;
+    e.preventDefault();
+    toggleSection(head);
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    const head = e.target.closest('.adm-section-toggle');
+    if (!head) return;
+    e.preventDefault();
+    toggleSection(head);
+  });
+}
+
+wireAdminSectionToggles();
+
+async function unloadAllLoadedModels(btn) {
+  const msg = 'Unload every currently loaded local model? Downloaded model files and endpoints will stay in place.';
+  if (uiModule?.styledConfirm) {
+    const ok = await uiModule.styledConfirm(msg, { confirmText: 'Unload all' });
+    if (!ok) return;
+  } else if (!confirm(msg)) {
+    return;
+  }
+
+  const original = btn ? btn.innerHTML : '';
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = '<span style="opacity:0.7;">Unloading...</span>';
+  }
+  try {
+    const res = await fetch('/api/model-endpoints/unload-all', {
+      method: 'POST',
+      credentials: 'same-origin',
+    });
+    let data = {};
+    try { data = await res.json(); } catch (_) {}
+    if (!res.ok && !data.message) {
+      throw new Error(`Unload failed (${res.status})`);
+    }
+    const message = data.message || `Unloaded ${data.unloaded || 0} loaded model${data.unloaded === 1 ? '' : 's'}.`;
+    if (uiModule?.showToast) uiModule.showToast(message, data.failed ? 5200 : 2600);
+  } catch (err) {
+    if (uiModule?.showToast) {
+      uiModule.showToast(err && err.message ? err.message : 'Unload all failed', 5200);
+    }
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.innerHTML = original;
+    }
+  }
+}
+
 /* ═══════════════════════════════════════════
    USERS TAB
    ═══════════════════════════════════════════ */
@@ -42,6 +106,23 @@ async function loadUsers() {
     data.users.forEach(u => {
       const row = document.createElement('div');
       row.className = 'admin-user-row';
+      const authSource = String(u.auth_source || 'local').trim().toLowerCase() || 'local';
+      const isLdap = authSource === 'ldap';
+      const adminManagedByLdap = !!u.admin_managed_by_ldap;
+      const userBadges = [
+        u.is_admin ? '<span class="admin-badge" style="margin-left:6px;">ADMIN</span>' : '',
+        isLdap ? '<span class="admin-badge admin-badge-muted" style="margin-left:6px;">LDAP</span>' : '',
+        adminManagedByLdap ? '<span class="admin-badge admin-badge-muted" style="margin-left:6px;">GROUP MANAGED</span>' : '',
+      ].join('');
+      const userHint = u.is_admin
+        ? ''
+        : `<span style="font-size:10px;opacity:0.4;display:block;">${isLdap ? 'Directory user' : 'Click to manage privileges'}</span>`;
+      const adminToggleLabel = adminManagedByLdap
+        ? 'LDAP managed'
+        : (u.is_admin ? 'Revoke admin' : 'Make admin');
+      const adminToggleDisabled = adminManagedByLdap
+        ? 'disabled title="LDAP group configuration manages this user\'s admin status"'
+        : '';
 
       // Header: name + badges + delete
       const header = document.createElement('div');
@@ -52,11 +133,12 @@ async function loadUsers() {
           <div style="width:28px;height:28px;border-radius:50%;background:color-mix(in srgb, var(--accent) 20%, var(--panel));display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:600;flex-shrink:0;color:var(--accent);">${esc(initial)}</div>
           <div>
             <span class="admin-user-name">${esc(u.username)}</span>
-            ${u.is_admin ? '<span class="admin-badge" style="margin-left:6px;">ADMIN</span>' : '<span style="font-size:10px;opacity:0.4;display:block;">Click to manage privileges</span>'}
+            ${userBadges}
+            ${userHint}
           </div>
         </div>
         <div style="display:flex;gap:8px;align-items:center;">
-          <button class="admin-btn-sm" data-adm-toggle-admin="${esc(u.username)}" data-make-admin="${u.is_admin ? '0' : '1'}" style="font-size:11px;">${u.is_admin ? 'Revoke admin' : 'Make admin'}</button>
+          <button class="admin-btn-sm" data-adm-toggle-admin="${esc(u.username)}" data-make-admin="${u.is_admin ? '0' : '1'}" style="font-size:11px;" ${adminToggleDisabled}>${adminToggleLabel}</button>
           <button class="admin-btn-sm" data-adm-rename-user="${esc(u.username)}" style="font-size:11px;">Rename</button>
           ${u.is_admin ? '' : `<button class="admin-btn-delete" data-adm-del-user="${esc(u.username)}" style="font-size:11px;">Remove</button>`}
           ${u.is_admin ? '' : '<svg class="admin-user-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="opacity:0.3;transition:transform 0.2s,opacity 0.2s;"><polyline points="6 9 12 15 18 9"/></svg>'}
@@ -206,6 +288,7 @@ async function loadUsers() {
       if (adminToggleBtn) {
         adminToggleBtn.addEventListener('click', async (e) => {
           e.stopPropagation();
+          if (adminToggleBtn.disabled) return;
           const username = adminToggleBtn.dataset.admToggleAdmin;
           const makeAdmin = adminToggleBtn.dataset.makeAdmin === '1';
           const confirmMsg = makeAdmin
@@ -392,6 +475,226 @@ function initAddUser() {
       else { msg.textContent = data.detail || 'Failed'; msg.className = 'admin-error'; }
     } catch (e) { msg.textContent = 'Request failed'; msg.className = 'admin-error'; }
     el('adm-addBtn').disabled = false;
+  });
+}
+
+/* ═══════════════════════════════════════════
+   USERS TAB — LDAP / FreeIPA
+   ═══════════════════════════════════════════ */
+function _setLdapMessage(text, kind) {
+  const msg = el('adm-ldapMsg');
+  if (!msg) return;
+  msg.textContent = text || '';
+  msg.className = `ldap-settings-msg${kind ? ` admin-${kind}` : ''}`;
+}
+
+function _ldapErrorDetail(data, fallback) {
+  if (!data) return fallback;
+  if (typeof data.detail === 'string') return data.detail;
+  if (Array.isArray(data.detail)) return data.detail.map(d => d.msg || d.message || String(d)).join('; ');
+  return fallback;
+}
+
+function _joinLdapList(value) {
+  if (Array.isArray(value)) return value.join('\n');
+  if (value == null) return '';
+  return String(value);
+}
+
+function _splitLdapList(value) {
+  const seen = new Set();
+  const out = [];
+  String(value || '')
+    .replace(/\r/g, '\n')
+    .split(/\n|;/)
+    .forEach(part => {
+      const chunk = part.trim();
+      if (!chunk) return;
+      const pieces = chunk.includes('=')
+        ? [chunk]
+        : chunk.split(',').map(s => s.trim()).filter(Boolean);
+      pieces.forEach(piece => {
+        if (!seen.has(piece)) {
+          seen.add(piece);
+          out.push(piece);
+        }
+      });
+    });
+  return out;
+}
+
+function _setInputValue(id, value) {
+  const input = el(id);
+  if (input) input.value = value == null ? '' : String(value);
+}
+
+function _setInputChecked(id, value) {
+  const input = el(id);
+  if (input) input.checked = !!value;
+}
+
+function _populateLdapSettings(data) {
+  if (!data || !el('adm-ldapCard')) return;
+  _setInputChecked('adm-ldapEnabled', data.enabled);
+  _setInputChecked('adm-ldapStartTls', data.start_tls);
+  _setInputValue('adm-ldapServerUri', data.server_uri);
+  _setInputValue('adm-ldapBindDn', data.bind_dn);
+  _setInputValue('adm-ldapUserBaseDn', data.user_base_dn);
+  _setInputValue('adm-ldapUserFilter', data.user_filter);
+  _setInputValue('adm-ldapUserNameAttribute', data.user_name_attribute);
+  _setInputValue('adm-ldapDisplayNameAttribute', data.display_name_attribute);
+  _setInputValue('adm-ldapEmailAttribute', data.email_attribute);
+  _setInputValue('adm-ldapGroupBaseDn', data.group_base_dn);
+  _setInputValue('adm-ldapGroupFilter', data.group_filter);
+  _setInputValue('adm-ldapAllowedGroups', _joinLdapList(data.allowed_groups));
+  _setInputValue('adm-ldapAdminGroups', _joinLdapList(data.admin_groups));
+  _setInputValue('adm-ldapConnectTimeout', data.connect_timeout);
+  _setInputValue('adm-ldapBindPassword', '');
+  _setInputChecked('adm-ldapClearBindPassword', false);
+
+  const bindPassword = el('adm-ldapBindPassword');
+  if (bindPassword) {
+    bindPassword.placeholder = data.bind_password_configured
+      ? 'Saved password configured'
+      : 'Optional bind password';
+  }
+  const source = el('adm-ldapSource');
+  if (source) {
+    const label = data.source === 'env' ? 'ENV DEFAULTS' : (data.source ? 'SAVED' : '');
+    source.textContent = label;
+    source.classList.toggle('hidden', !label);
+  }
+}
+
+async function loadLdapSettings() {
+  if (!el('adm-ldapCard')) return;
+  try {
+    const res = await fetch('/api/auth/ldap-settings', { credentials: 'same-origin' });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      _setLdapMessage(_ldapErrorDetail(data, 'Failed to load LDAP settings'), 'error');
+      return;
+    }
+    _populateLdapSettings(data);
+  } catch (err) {
+    _setLdapMessage('Failed to load LDAP settings', 'error');
+  }
+}
+
+function _ldapSettingsFromForm() {
+  const connectTimeoutRaw = (el('adm-ldapConnectTimeout')?.value || '').trim();
+  const settings = {
+    enabled: !!el('adm-ldapEnabled')?.checked,
+    server_uri: (el('adm-ldapServerUri')?.value || '').trim(),
+    bind_dn: (el('adm-ldapBindDn')?.value || '').trim(),
+    user_base_dn: (el('adm-ldapUserBaseDn')?.value || '').trim(),
+    user_filter: (el('adm-ldapUserFilter')?.value || '').trim(),
+    user_name_attribute: (el('adm-ldapUserNameAttribute')?.value || '').trim(),
+    display_name_attribute: (el('adm-ldapDisplayNameAttribute')?.value || '').trim(),
+    email_attribute: (el('adm-ldapEmailAttribute')?.value || '').trim(),
+    group_base_dn: (el('adm-ldapGroupBaseDn')?.value || '').trim(),
+    group_filter: (el('adm-ldapGroupFilter')?.value || '').trim(),
+    allowed_groups: _splitLdapList(el('adm-ldapAllowedGroups')?.value || ''),
+    admin_groups: _splitLdapList(el('adm-ldapAdminGroups')?.value || ''),
+    start_tls: !!el('adm-ldapStartTls')?.checked,
+  };
+  const bindPassword = el('adm-ldapBindPassword')?.value || '';
+  if (bindPassword) settings.bind_password = bindPassword;
+  if (el('adm-ldapClearBindPassword')?.checked) settings.clear_bind_password = true;
+  if (connectTimeoutRaw) settings.connect_timeout = Number(connectTimeoutRaw);
+  return settings;
+}
+
+function _renderLdapTestResult(data) {
+  const result = el('adm-ldapTestResult');
+  if (!result) return;
+  if (!data || typeof data !== 'object') {
+    result.classList.add('hidden');
+    result.textContent = '';
+    return;
+  }
+  const groups = Array.isArray(data.groups) ? data.groups : [];
+  const lines = [
+    `Status: ${data.ok ? 'OK' : 'Failed'}`,
+    data.stage ? `Stage: ${data.stage}` : '',
+    data.detail ? `Detail: ${data.detail}` : '',
+    data.host ? `Host: ${data.host}` : '',
+    data.username ? `Username: ${data.username}` : '',
+    data.user_dn ? `User DN: ${data.user_dn}` : '',
+    groups.length ? `Groups: ${groups.join(', ')}` : '',
+    typeof data.in_allowed_group === 'boolean' ? `Allowed group match: ${data.in_allowed_group ? 'yes' : 'no'}` : '',
+    typeof data.is_admin === 'boolean' ? `LDAP admin: ${data.is_admin ? 'yes' : 'no'}` : '',
+  ].filter(Boolean);
+  result.textContent = lines.join('\n');
+  result.classList.remove('hidden');
+}
+
+async function saveLdapSettings() {
+  const saveBtn = el('adm-ldapSaveBtn');
+  if (!saveBtn) return;
+  _setLdapMessage('Saving LDAP settings...', '');
+  saveBtn.disabled = true;
+  try {
+    const res = await fetch('/api/auth/ldap-settings', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(_ldapSettingsFromForm()),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      _setLdapMessage(_ldapErrorDetail(data, 'Failed to save LDAP settings'), 'error');
+      return;
+    }
+    _populateLdapSettings(data);
+    _setLdapMessage('LDAP settings saved', 'success');
+    loadUsers();
+  } catch (err) {
+    _setLdapMessage('Failed to save LDAP settings', 'error');
+  } finally {
+    saveBtn.disabled = false;
+  }
+}
+
+async function testLdapSettings() {
+  const testBtn = el('adm-ldapTestBtn');
+  const username = (el('adm-ldapTestUsername')?.value || '').trim();
+  const password = el('adm-ldapTestPassword')?.value || '';
+  if (!username || !password) {
+    _setLdapMessage('Test username and password are required', 'error');
+    return;
+  }
+  if (!testBtn) return;
+  _setLdapMessage('Testing LDAP login...', '');
+  _renderLdapTestResult(null);
+  testBtn.disabled = true;
+  try {
+    const res = await fetch('/api/auth/ldap-settings/test', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password, settings: _ldapSettingsFromForm() }),
+    });
+    const data = await res.json().catch(() => ({}));
+    _renderLdapTestResult(data);
+    if (!res.ok) {
+      _setLdapMessage(_ldapErrorDetail(data, 'LDAP test failed'), 'error');
+      return;
+    }
+    _setLdapMessage(data.ok ? 'LDAP login test passed' : `LDAP test failed: ${data.detail || data.stage || 'unknown error'}`, data.ok ? 'success' : 'error');
+  } catch (err) {
+    _setLdapMessage('LDAP test request failed', 'error');
+  } finally {
+    testBtn.disabled = false;
+  }
+}
+
+function initLdapSettings() {
+  if (!el('adm-ldapCard')) return;
+  el('adm-ldapSaveBtn')?.addEventListener('click', saveLdapSettings);
+  el('adm-ldapTestBtn')?.addEventListener('click', testLdapSettings);
+  el('adm-ldapTestPassword')?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') testLdapSettings();
   });
 }
 
@@ -702,11 +1005,14 @@ async function loadEndpoints() {
                 <a href="#" data-ep-select-none="${epId}">None</a>
               </span>
             </div>${warningHtml}${showSearch ? `<input type="search" class="mcp-tools-search" placeholder="Search ${sortedModels.length} models..." data-ep-search="${epId}">` : ''}<div class="mcp-tools-list">` + sortedModels.map(m =>
-              `<label title="${esc(m.id)}" data-ep-model-row data-search="${esc((m.display + ' ' + m.id).toLowerCase())}" class="adm-model-row">
-                <input type="checkbox" class="adm-cb-hidden" data-ep-model-id="${esc(m.id)}" ${!m.is_hidden ? 'checked' : ''}>
-                <span class="adm-check-dot" aria-hidden="true"></span>
-                <span>${esc(m.display)}</span>
-              </label>`
+              `<div title="${esc(m.id)}" data-ep-model-row data-search="${esc((m.display + ' ' + m.id).toLowerCase())}" class="adm-model-row">
+                <label class="adm-model-toggle">
+                  <input type="checkbox" class="adm-cb-hidden" data-ep-model-id="${esc(m.id)}" ${!m.is_hidden ? 'checked' : ''}>
+                  <span class="adm-check-dot" aria-hidden="true"></span>
+                  <span class="adm-model-name">${esc(m.display)}</span>
+                </label>
+                <button type="button" class="adm-model-unload" data-ep-unload-model="${esc(m.id)}" title="Unload this model from its runtime">Unload</button>
+              </div>`
             ).join('') + '</div>';
             const filterRows = (q) => {
               const needle = q.trim().toLowerCase();
@@ -729,6 +1035,41 @@ async function loadEndpoints() {
                 if (row.style.display !== 'none') row.querySelector('input[type=checkbox]').checked = false;
               });
               _saveEpModelState(epId, panel);
+            });
+            panel.querySelectorAll('[data-ep-unload-model]').forEach(btn => {
+              btn.addEventListener('click', async (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                const model = btn.dataset.epUnloadModel || '';
+                const row = btn.closest('[data-ep-model-row]');
+                const label = row?.querySelector('.adm-model-name')?.textContent || model;
+                const prev = btn.textContent;
+                btn.disabled = true;
+                btn.textContent = '...';
+                try {
+                  const res = await fetch(`/api/model-endpoints/${epId}/unload`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    credentials: 'same-origin',
+                    body: JSON.stringify({ model }),
+                  });
+                  let data = {};
+                  try { data = await res.json(); } catch (_) {}
+                  if (!res.ok || !data.ok) {
+                    throw new Error(data.detail || data.message || `Unload failed (${res.status})`);
+                  }
+                  if (uiModule && uiModule.showToast) {
+                    uiModule.showToast(data.message || `Unload requested for ${label}`, 2600);
+                  }
+                } catch (err) {
+                  if (uiModule && uiModule.showToast) {
+                    uiModule.showToast(err && err.message ? err.message : 'Unload failed', 5200);
+                  }
+                } finally {
+                  btn.disabled = false;
+                  btn.textContent = prev;
+                }
+              });
             });
             panel.querySelectorAll('input[type=checkbox]').forEach(cb => {
               cb.addEventListener('change', () => _saveEpModelState(epId, panel));
@@ -814,7 +1155,7 @@ function initEndpointForm() {
       urlInput.value = '';
       urlInput.placeholder = deviceAuthProvider === 'copilot'
         ? 'GitHub Copilot uses GitHub account sign-in'
-        : 'ChatGPT Subscription uses OpenAI account sign-in';
+        : `${deviceAuthConfig.label} uses OpenAI account sign-in`;
       urlInput.readOnly = true;
       if (apiKey) {
         apiKey.value = '';
@@ -936,6 +1277,7 @@ function initEndpointForm() {
   }
   function _normalizeBaseUrl(raw) {
     let u = raw.trim();
+    u = u.replace(/\\/g, '/');
     // Fix common protocol typos
     u = u.replace(/^https?:\/(?!\/)/, m => m + '/');  // https:/ → https://
     u = u.replace(/^htp:/, 'http:').replace(/^htps:/, 'https:');
@@ -955,6 +1297,20 @@ function initEndpointForm() {
     u = u.split('?')[0].split('#')[0];
     try {
       const parsed = new URL(u);
+      const host = parsed.hostname.toLowerCase();
+      const knownOpenAiV1Hosts = new Set([
+        'api.openai.com',
+        'api.x.ai',
+        'api.mistral.ai',
+        'api.together.xyz',
+      ]);
+      if (host === 'api.deepseek.com') {
+        parsed.pathname = '';
+        u = parsed.toString().replace(/\/+$/, '');
+      } else if (knownOpenAiV1Hosts.has(host) && (!parsed.pathname || parsed.pathname === '/')) {
+        parsed.pathname = '/v1';
+        u = parsed.toString().replace(/\/+$/, '');
+      }
       if (parsed.hostname.endsWith('ollama.com')) {
         u = 'https://ollama.com/api';
       }
@@ -970,6 +1326,52 @@ function initEndpointForm() {
     }
     return u;
   }
+
+  function _isMobileStandalone() {
+    try {
+      const params = new URLSearchParams(window.location.search || '');
+      if (params.get('mobile') === 'standalone') return true;
+    } catch (_) {}
+    try {
+      const ua = navigator.userAgent || '';
+      return /\bOdysseusAndroid\b/i.test(ua) && /^https?:\/\/127\.0\.0\.1:70[1-3][0-9]\b/i.test(window.location.href || '');
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function _clearStandaloneEndpointDrafts() {
+    if (!_isMobileStandalone()) return;
+    const resetKey = 'odysseus.mobileStandalone.endpointDraftReset.v1';
+    let shouldReset = true;
+    try { shouldReset = localStorage.getItem(resetKey) !== '1'; } catch (_) {}
+
+    const localUrlInput = el('adm-epLocalUrl');
+    if (shouldReset && localUrlInput && localUrlInput.value.trim()) {
+      const normalized = _normalizeBaseUrl(localUrlInput.value);
+      if (_isLocalEndpoint(normalized)) localUrlInput.value = '';
+    }
+    if (shouldReset) {
+      const localKey = el('adm-epLocalApiKey');
+      const apiKey = el('adm-epApiKey');
+      if (localKey) localKey.value = '';
+      if (apiKey) apiKey.value = '';
+      try { localStorage.setItem(resetKey, '1'); } catch (_) {}
+    }
+
+    if (!urlInput) return;
+    const rawApiUrl = urlInput.value.trim();
+    if (provider && provider.value && !DEVICE_AUTH_PROVIDER_VALUES.has(provider.value)) {
+      const hasStaleDraft = rawApiUrl && rawApiUrl !== provider.value;
+      if (!rawApiUrl || hasStaleDraft || rawApiUrl.includes('\\')) urlInput.value = provider.value;
+    } else if (rawApiUrl.includes('\\')) {
+      urlInput.value = _normalizeBaseUrl(rawApiUrl);
+    }
+  }
+
+  _clearStandaloneEndpointDrafts();
+  setTimeout(_clearStandaloneEndpointDrafts, 0);
+  setTimeout(_clearStandaloneEndpointDrafts, 250);
 
   async function _defaultOllamaUrl() {
     try {
@@ -1031,6 +1433,8 @@ function initEndpointForm() {
         fd.append('endpoint_kind', _apiEndpointKind());
         fd.append('model_refresh_timeout', '30');
         if (apiKey) fd.append('api_key', apiKey);
+        const epType = el('adm-epType');
+        if (epType) fd.append('model_type', epType.value);
         const res = await fetch('/api/model-endpoints/test', {
           method: 'POST',
           body: fd,
@@ -1485,6 +1889,11 @@ function initEndpointForm() {
     });
   }
 
+  const unloadAllBtn = el('adm-epUnloadAllBtn');
+  if (unloadAllBtn) {
+    unloadAllBtn.addEventListener('click', () => unloadAllLoadedModels(unloadAllBtn));
+  }
+
   const clearOfflineBtn = el('adm-epClearOfflineBtn');
   if (clearOfflineBtn) {
     clearOfflineBtn.addEventListener('click', async () => {
@@ -1563,6 +1972,8 @@ function initEndpointForm() {
         const fd = new FormData();
         fd.append('base_url', url);
         if (apiKey) fd.append('api_key', apiKey);
+        const lt = el('adm-epLocalType');
+        if (lt) fd.append('model_type', lt.value);
         const res = await fetch('/api/model-endpoints/test', { method: 'POST', body: fd, credentials: 'same-origin' });
         const d = await res.json();
         _renderEndpointTestResult(msg, res, d);
@@ -3073,7 +3484,7 @@ function initLogsView() {
 function initAll() {
   modalEl = el('settings-modal');
   const inits = [
-    initSignupToggle, initShareDefaultsToggle, initAddUser, initEndpointForm, initMcpForm,
+    initSignupToggle, initShareDefaultsToggle, initAddUser, initLdapSettings, initEndpointForm, initMcpForm,
     initCalDAV, initBackup, initDangerZone, initTokenForm, initLogsView,
     () => settingsModule.initIntegrations()
   ];
@@ -3086,6 +3497,7 @@ function initAll() {
 
 function refreshAll() {
   loadUsers();
+  loadLdapSettings();
   loadEndpoints();
   loadBuiltinTools();
   loadMcpServers();

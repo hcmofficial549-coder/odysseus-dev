@@ -45,6 +45,7 @@ import spinnerModule from './js/spinner.js';
 import { initKeyboardShortcuts } from './js/keyboard-shortcuts.js';
 import { initSidebarLayout, syncRailSide } from './js/sidebar-layout.js';
 import { initSectionCollapse, initSectionDrag } from './js/section-management.js';
+import './js/effects/cursorTrail.js';
 
 const API_BASE = window.location.origin;
 window.themeModule = themeModule;
@@ -200,6 +201,243 @@ window.fetch = async function(...args) {
 
 const el = uiModule.el;
 
+function isOdysseusAndroidWebView() {
+  return /OdysseusAndroid\/\d+/i.test(navigator.userAgent || '')
+    || typeof window.OdysseusAndroid !== 'undefined';
+}
+
+function dismissSoftKeyboard() {
+  const active = document.activeElement;
+  let dismissed = document.documentElement.classList.contains('android-keyboard-open');
+  if (active && active !== document.body && active.matches?.('input, textarea, [contenteditable="true"], [contenteditable=""]')) {
+    active.blur();
+    dismissed = true;
+  }
+  try {
+    window.OdysseusAndroid?.hideKeyboard?.();
+  } catch (_) {}
+  return dismissed;
+}
+
+function keyboardDismissSettleDelay() {
+  return isOdysseusAndroidWebView() ? 220 : 120;
+}
+
+function openAndroidConnectionMode() {
+  dismissSoftKeyboard();
+  const bridge = window.OdysseusAndroid;
+  if (isOdysseusAndroidWebView() && bridge && typeof bridge.showConnectionMode === 'function') {
+    bridge.showConnectionMode();
+    return true;
+  }
+  return openPcAndroidConnectModal();
+}
+
+function ensurePcAndroidConnectModal() {
+  let modal = document.getElementById('android-connect-modal');
+  if (modal) return modal;
+  modal = document.createElement('div');
+  modal.id = 'android-connect-modal';
+  modal.className = 'modal hidden';
+  modal.innerHTML = `
+    <div class="modal-content android-connect-modal-content" role="dialog" aria-label="Android connection">
+      <div class="modal-header">
+        <h4>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:6px">
+            <path d="M10 13a5 5 0 0 0 7.54.54l2-2a5 5 0 0 0-7.07-7.07l-1.15 1.15"/>
+            <path d="M14 11a5 5 0 0 0-7.54-.54l-2 2a5 5 0 0 0 7.07 7.07l1.15-1.15"/>
+          </svg>
+          Connect Android
+        </h4>
+        <button class="close-btn" id="android-connect-close" aria-label="Close Android connection">✖</button>
+      </div>
+      <div class="modal-body android-connect-body">
+        <div class="android-connect-options">
+          <button type="button" class="android-connect-option primary" id="android-connect-adb">
+            <span class="android-connect-option-title">ADB PC</span>
+            <span class="android-connect-option-sub">Reverse 7000 and launch Odysseus</span>
+          </button>
+          <button type="button" class="android-connect-option" data-connect-note="emulator">
+            <span class="android-connect-option-title">Emulator</span>
+            <span class="android-connect-option-sub">Use http://10.0.2.2:7000</span>
+          </button>
+          <button type="button" class="android-connect-option" data-connect-note="url">
+            <span class="android-connect-option-title">URL / LAN</span>
+            <span class="android-connect-option-sub">Use a reachable PC or Tailscale URL</span>
+          </button>
+          <button type="button" class="android-connect-option" data-connect-note="standalone">
+            <span class="android-connect-option-title">Standalone</span>
+            <span class="android-connect-option-sub">Use the phone-local backend</span>
+          </button>
+        </div>
+        <div class="android-connect-actions">
+          <button type="button" class="android-disconnect-btn" id="android-disconnect-all" title="Run 'adb disconnect' to clear stale/stuck connections">
+            Disconnect All ADB
+          </button>
+        </div>
+        <div class="android-connect-status" id="android-connect-status">Ready</div>
+        <pre class="android-connect-output" id="android-connect-output"></pre>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(modal);
+  modal.querySelector('#android-connect-close')?.addEventListener('click', closePcAndroidConnectModal);
+  modal.addEventListener('mousedown', e => {
+    if (e.target === modal) closePcAndroidConnectModal();
+  });
+  modal.querySelector('#android-connect-adb')?.addEventListener('click', runAndroidAdbPcSetup);
+  modal.querySelector('#android-disconnect-all')?.addEventListener('click', runAndroidAdbDisconnectAll);
+  modal.querySelectorAll('[data-connect-note]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const kind = btn.dataset.connectNote || '';
+      const bridge = window.OdysseusAndroid;
+      if (bridge && kind === 'standalone' && bridge.switchToStandalone) {
+        closePcAndroidConnectModal();
+        bridge.switchToStandalone();
+      } else if (bridge && kind === 'emulator' && bridge.switchToEmulator) {
+        closePcAndroidConnectModal();
+        bridge.switchToEmulator();
+      } else if (bridge && kind === 'url' && bridge.switchToUrl) {
+        closePcAndroidConnectModal();
+        bridge.switchToUrl('');
+      } else {
+        showAndroidConnectNote(kind);
+      }
+    });
+  });
+  // Wire drag/dock like other windows (landscape drag, edge dock, etc.)
+  try {
+    const content = modal.querySelector('.modal-content');
+    const header = modal.querySelector('.modal-header');
+    if (content && header) {
+      makeWindowDraggable(modal, {
+        content, header,
+        skipSelector: '.close-btn, button',
+        enableDock: true,
+        enableResize: false,
+      });
+      // Re-center when opened (hidden→visible)
+      const resetGeometry = () => {
+        modal.classList.remove('modal-left-docked', 'modal-right-docked', 'minimized', 'modal-minimized');
+        delete content.dataset._tileZone;
+        delete content.dataset._tilePreSnap;
+        ['position', 'left', 'top', 'right', 'bottom', 'width', 'height',
+          'max-width', 'max-height', 'border-radius', 'transform', 'margin',
+        ].forEach(p => content.style.removeProperty(p));
+      };
+      let wasHidden = modal.classList.contains('hidden');
+      new MutationObserver(() => {
+        const isHidden = modal.classList.contains('hidden');
+        if (wasHidden && !isHidden) resetGeometry();
+        wasHidden = isHidden;
+      }).observe(modal, { attributes: true, attributeFilter: ['class'] });
+    }
+  } catch (_) {}
+  return modal;
+}
+
+function openPcAndroidConnectModal() {
+  const modal = ensurePcAndroidConnectModal();
+  modal.classList.remove('hidden');
+  modal.style.display = 'flex';
+}
+
+function closePcAndroidConnectModal() {
+  const modal = document.getElementById('android-connect-modal');
+  if (!modal) return;
+  modal.classList.add('hidden');
+  modal.style.display = 'none';
+}
+
+function setAndroidConnectStatus(text, kind = '') {
+  const status = document.getElementById('android-connect-status');
+  if (!status) return;
+  status.textContent = text || '';
+  status.dataset.kind = kind;
+}
+
+function setAndroidConnectOutput(text) {
+  const out = document.getElementById('android-connect-output');
+  if (!out) return;
+  out.textContent = text || '';
+}
+
+function showAndroidConnectNote(kind) {
+  const notes = {
+    emulator: 'Emulator target: http://10.0.2.2:7000',
+    url: 'URL target: use a PC LAN, Tailscale, or tunnel URL that the phone can reach.',
+    standalone: 'Standalone runs from the Android app without the PC backend.',
+  };
+  setAndroidConnectStatus(notes[kind] || 'Ready');
+}
+
+async function runAndroidAdbPcSetup() {
+  const btn = document.getElementById('android-connect-adb');
+  if (btn) btn.disabled = true;
+  setAndroidConnectStatus('Connecting ADB PC...', 'running');
+  setAndroidConnectOutput('');
+  try {
+    const res = await fetch('/api/android/adb-pc/connect', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    });
+    let data = {};
+    try { data = await res.json(); } catch (_) {}
+    if (!res.ok || data.ok === false) {
+      const err = data.error || data.detail || res.statusText || 'ADB PC setup failed.';
+      setAndroidConnectStatus('ADB PC failed', 'error');
+      setAndroidConnectOutput(err);
+      uiModule.showToast('ADB PC setup failed.');
+      return;
+    }
+    setAndroidConnectStatus('ADB PC connected', 'ok');
+    setAndroidConnectOutput(data.output || 'ADB reverse active.');
+    uiModule.showToast('Android ADB PC connected.');
+  } catch (e) {
+    setAndroidConnectStatus('ADB PC failed', 'error');
+    setAndroidConnectOutput(e?.message || String(e));
+    uiModule.showToast('ADB PC setup failed.');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function runAndroidAdbDisconnectAll() {
+  const btn = document.getElementById('android-disconnect-all');
+  if (btn) btn.disabled = true;
+  setAndroidConnectStatus('Disconnecting all ADB...', 'running');
+  setAndroidConnectOutput('');
+  try {
+    const res = await fetch('/api/android/adb/disconnect-all', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    });
+    let data = {};
+    try { data = await res.json(); } catch (_) {}
+    if (!res.ok || data.ok === false) {
+      const err = data.error || data.detail || res.statusText || 'ADB disconnect failed.';
+      setAndroidConnectStatus('ADB disconnect failed', 'error');
+      setAndroidConnectOutput(err);
+      uiModule.showToast('ADB disconnect failed.');
+      return;
+    }
+    setAndroidConnectStatus('All ADB connections cleared', 'ok');
+    setAndroidConnectOutput(data.output || 'All ADB connections disconnected.');
+    uiModule.showToast('All ADB connections cleared.');
+  } catch (e) {
+    setAndroidConnectStatus('ADB disconnect failed', 'error');
+    setAndroidConnectOutput(e?.message || String(e));
+    uiModule.showToast('ADB disconnect failed.');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
 // Default chat config — refreshed on every new-chat action so settings
 // changes take effect immediately (previously cached once at page load and
 // went stale when the user changed their default model).
@@ -285,6 +523,17 @@ async function _syncWelcomeModelHint() {
   const sub = document.getElementById('welcome-sub');
   if (!tip && !sub) return;
   const hasModel = await _hasUsableChatModel();
+  // Model discovery is asynchronous. Nobody or Research may have taken
+  // ownership of the welcome copy while it was in flight, so re-check the
+  // live state after the await before changing any contextual messaging.
+  const contextualWelcomeActive =
+    document.getElementById('incognito-toggle')?.checked ||
+    document.getElementById('research-toggle')?.checked;
+  const contextualCopyOwned = Boolean(
+    (sub && ('originalText' in sub.dataset || 'researchOrigText' in sub.dataset)) ||
+    (tip && ('originalTip' in tip.dataset || 'researchOrigTip' in tip.dataset))
+  );
+  if (contextualWelcomeActive || contextualCopyOwned) return;
   if (hasModel) {
     if (sub && !sub.dataset.researchOrigText) sub.textContent = 'New chat ready.';
     if (tip) tip.textContent = 'Pick a model if you want, or just type.';
@@ -306,8 +555,13 @@ function initializeEventListeners() {
   // File attachments (inside overflow menu)
   const _overflowAttach = el('overflow-attach-btn');
   if (_overflowAttach) _overflowAttach.addEventListener('click', fileHandlerModule.openPicker);
-  el('file-input').addEventListener('change', async (e)=>{
-    await fileHandlerModule.addFiles(Array.from(e.target.files || []));
+  el('file-input').addEventListener('change', (e)=>{
+    const files = Array.from(e.target.files || []);
+    if (files.length) {
+      fileHandlerModule.addFiles(files);
+      fileHandlerModule.renderAttachStrip();
+    }
+    // Reset so selecting the same image again fires another change event.
     e.target.value = '';
     // Refocus textarea after file picker closes (mobile keyboard)
     const ta = el('message');
@@ -336,6 +590,17 @@ function initializeEventListeners() {
   // welcome screen since it isn't inside chat-history.
   const _metaCountEl = el('current-meta-count');
   const _chatHistEl = el('chat-history');
+  const _scrollProgress = _chatHistEl?.querySelector('.chat-history-scroll-progress') || null;
+  const _typingIndicator = _chatHistEl?.querySelector('.ai-typing-indicator') || null;
+  const _ensureChatDecorations = () => {
+    if (!_chatHistEl) return;
+    if (_scrollProgress && _chatHistEl.firstElementChild !== _scrollProgress) {
+      _chatHistEl.prepend(_scrollProgress);
+    }
+    if (_typingIndicator && _chatHistEl.lastElementChild !== _typingIndicator) {
+      _chatHistEl.append(_typingIndicator);
+    }
+  };
   if (_metaCountEl && _chatHistEl) {
     let _countScheduled = false;
     const _updateMsgCount = () => {
@@ -353,15 +618,73 @@ function initializeEventListeners() {
   }
 
   // Scrolling
-  el('chat-history').addEventListener('scroll', uiModule.debounce(() => {
+  const _updateChatAtBottomState = () => {
     const box = el('chat-history');
-    const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 80;
-    uiModule.setAutoScroll(atBottom);
+    if (!box) return false;
+    const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 80;
+    const hasMessages = !!box.querySelector(':scope > .msg');
+    box.classList.toggle('has-more-below', !nearBottom);
+    document.body.classList.toggle('chat-at-bottom', hasMessages && nearBottom);
+    return nearBottom;
+  };
+  _updateChatAtBottomState();
+  new MutationObserver((mutations) => {
+    requestAnimationFrame(_updateChatAtBottomState);
+    // Session/new-chat rendering clears chat-history with innerHTML. Keep the
+    // progress bar and typing indicator attached without forcing every caller
+    // that owns message rendering to know about these persistent decorations.
+    const replacingHistory = mutations.some(m => Array.from(m.removedNodes).some(node => (
+      node === _scrollProgress
+      || node === _typingIndicator
+      || node.classList?.contains('msg')
+      || !!node.querySelector?.('.msg')
+    )));
+    _ensureChatDecorations();
+
+    // A history replacement can append hundreds of existing messages in one
+    // batch. Animate only genuinely new messages, and respect reduced motion.
+    const reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+    if (replacingHistory || reduceMotion) return;
+
+    const animateMessage = (node) => {
+      if (!node || node.classList.contains('msg-entering')) return;
+      node.classList.add('msg-entering');
+      const clear = () => node.classList.remove('msg-entering');
+      node.addEventListener('animationend', clear, { once: true });
+      // animationend is not guaranteed when styles change mid-render.
+      setTimeout(clear, 750);
+    };
+    // Message entrance animation
+    for (const m of mutations) {
+      for (const node of m.addedNodes) {
+        if (node.nodeType === 1) {
+          if (node.classList?.contains('msg')) animateMessage(node);
+          node.querySelectorAll?.('.msg:not(.msg-entering)').forEach(animateMessage);
+        }
+      }
+    }
+  })
+    .observe(el('chat-history'), { childList: true, subtree: true });
+  el('chat-history').addEventListener('scroll', uiModule.debounce(() => {
+    uiModule.setAutoScroll(_updateChatAtBottomState());
   }, 100));
   // Close all footer popups immediately on any scroll
   el('chat-history').addEventListener('scroll', () => {
+    _updateChatAtBottomState();
     document.querySelectorAll('.ctx-popup, .memory-used-detail, .msg-overflow-menu').forEach(p => p.remove());
     document.querySelectorAll('.memory-used-pill').forEach(p => { p._openDetail = null; });
+    // Scroll progress bar
+    const bar = _scrollProgress;
+    if (bar) {
+      const box = el('chat-history');
+      const max = box.scrollHeight - box.clientHeight;
+      bar.style.width = max > 0 ? ((box.scrollTop / max) * 100).toFixed(1) + '%' : '0%';
+    }
+    // Chat header frosted glass
+    const topBar = document.querySelector('.chat-top-bar');
+    if (topBar) {
+      topBar.classList.toggle('glass-scrolled', el('chat-history').scrollTop > 4);
+    }
   }, { passive: true });
 
   el('chat-history').addEventListener('wheel', (e) => {
@@ -376,15 +699,40 @@ function initializeEventListeners() {
     requestAnimationFrame(() => { _touchThrottled = false; });
   }, { passive: true });
 
+  // ── AI typing indicator: observe send-btn data-mode ──
+  if (_typingIndicator) {
+    const _updateTyping = () => {
+      const btn = document.querySelector('.send-btn');
+      const streaming = !!(btn && btn.dataset.mode === 'streaming');
+      _typingIndicator.classList.toggle('active', streaming);
+      if (streaming) uiModule.scrollHistory();
+    };
+    const sendBtn = document.querySelector('.send-btn');
+    if (sendBtn) {
+      new MutationObserver(_updateTyping).observe(sendBtn, { attributes: true, attributeFilter: ['data-mode'] });
+    }
+    _updateTyping();
+  }
+
   // Internal #session-id links from AI search results
   el('chat-history').addEventListener('click', (e) => {
     const link = e.target.closest('a.chat-link');
     if (!link) return;
-    const href = link.getAttribute('href');
-    if (href && href.startsWith('#') && sessionModule) {
-      e.preventDefault();
-      sessionModule.selectSession(href.slice(1));
+    const href = link.getAttribute('href') || '';
+    if (!href.startsWith('#') || !sessionModule) return;
+
+    const targetId = href.slice(1);
+    if (/^(session|document|note|image|email|event|task|skill|research)-/.test(targetId)) {
+      return;
     }
+
+    const knownSession = (sessionModule.getSessions?.() || [])
+      .some(s => String(s.id) === targetId);
+    if (!knownSession) return;
+
+    e.preventDefault();
+    e.stopPropagation();
+    sessionModule.selectSession(targetId);
   });
 
   // Export dropdown button
@@ -890,6 +1238,63 @@ function initializeEventListeners() {
     const s = loadToggleState(); s.research = active; saveToggleState(s);
     updatePlusDot();
     document.dispatchEvent(new CustomEvent('overflow-state-change'));
+
+    // Update welcome screen for research mode
+    const ws = el('welcome-screen');
+    const welcomeName = document.querySelector('.welcome-name');
+    const welcomeSub = el('welcome-sub');
+    const tipEl = el('welcome-tip');
+    const _resIco = '<svg class="welcome-boat" style="position:relative;top:0.5px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>';
+    if (active) {
+      if (welcomeName) {
+        if (!welcomeName.dataset.researchOrigHtml) welcomeName.dataset.researchOrigHtml = welcomeName.innerHTML;
+        if (!welcomeName.dataset.researchOrigDataText) {
+          welcomeName.dataset.researchOrigDataText = welcomeName.dataset.text || 'Odysseus';
+        }
+        welcomeName.innerHTML = _resIco + 'Deep Research';
+        welcomeName.dataset.text = 'Deep Research';
+      }
+      if (welcomeSub) {
+        if (!welcomeSub.dataset.researchOrigText) welcomeSub.dataset.researchOrigText = welcomeSub.textContent;
+        welcomeSub.textContent = 'Deep multi-step research with source gathering and synthesis.';
+      }
+      if (tipEl) {
+        if (!tipEl.dataset.researchOrigTip) tipEl.dataset.researchOrigTip = tipEl.textContent;
+        tipEl.textContent = '';
+        tipEl.style.display = 'none';
+      }
+      // Hide Nobody toggle during research mode
+      const _incBtn = el('incognito-btn');
+      if (_incBtn) { _incBtn.dataset.researchOrigDisplay = _incBtn.style.display; _incBtn.style.display = 'none'; }
+      // Close document panel if open
+      if (window.documentModule && window.documentModule.isPanelOpen()) {
+        window.documentModule.closePanel();
+      }
+    } else {
+      if (welcomeName && welcomeName.dataset.researchOrigHtml) {
+        welcomeName.innerHTML = welcomeName.dataset.researchOrigHtml;
+        delete welcomeName.dataset.researchOrigHtml;
+        welcomeName.dataset.text = welcomeName.dataset.researchOrigDataText || 'Odysseus';
+        delete welcomeName.dataset.researchOrigDataText;
+      }
+      if (welcomeSub && welcomeSub.dataset.researchOrigText) {
+        welcomeSub.textContent = welcomeSub.dataset.researchOrigText;
+        delete welcomeSub.dataset.researchOrigText;
+      }
+      if (tipEl && tipEl.dataset.researchOrigTip) {
+        tipEl.textContent = tipEl.dataset.researchOrigTip;
+        tipEl.style.opacity = '';
+        tipEl.style.display = '';
+        delete tipEl.dataset.researchOrigTip;
+      }
+      // Restore Nobody toggle
+      const _incBtn2 = el('incognito-btn');
+      if (_incBtn2 && _incBtn2.dataset.researchOrigDisplay !== undefined) {
+        _incBtn2.style.display = _incBtn2.dataset.researchOrigDisplay;
+        delete _incBtn2.dataset.researchOrigDisplay;
+      }
+    }
+    if (ws) { ws.style.animation = 'none'; ws.offsetHeight; ws.style.animation = 'welcome-enter 0.3s ease-out both'; }
   }
 
   /** Sync Group Chat indicator button + overflow. */
@@ -921,57 +1326,6 @@ function initializeEventListeners() {
     const s = loadToggleState(); s.group = active; saveToggleState(s);
     updatePlusDot();
     document.dispatchEvent(new CustomEvent('overflow-state-change'));
-
-    // Update welcome screen for research mode
-    const ws = el('welcome-screen');
-    const welcomeName = document.querySelector('.welcome-name');
-    const welcomeSub = el('welcome-sub');
-    const tipEl = el('welcome-tip');
-    const _resIco = '<svg class="welcome-boat" style="position:relative;top:0.5px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>';
-    if (active) {
-      if (welcomeName) {
-        if (!welcomeName.dataset.researchOrigHtml) welcomeName.dataset.researchOrigHtml = welcomeName.innerHTML;
-        welcomeName.innerHTML = _resIco + 'Deep Research';
-      }
-      if (welcomeSub) {
-        if (!welcomeSub.dataset.researchOrigText) welcomeSub.dataset.researchOrigText = welcomeSub.textContent;
-        welcomeSub.textContent = 'Deep multi-step research with source gathering and synthesis.';
-      }
-      if (tipEl) {
-        if (!tipEl.dataset.researchOrigTip) tipEl.dataset.researchOrigTip = tipEl.textContent;
-        tipEl.textContent = '';
-        tipEl.style.display = 'none';
-      }
-      // Hide Nobody toggle during research mode
-      const _incBtn = el('incognito-btn');
-      if (_incBtn) { _incBtn.dataset.researchOrigDisplay = _incBtn.style.display; _incBtn.style.display = 'none'; }
-      // Close document panel if open
-      if (window.documentModule && window.documentModule.isPanelOpen()) {
-        window.documentModule.closePanel();
-      }
-    } else {
-      if (welcomeName && welcomeName.dataset.researchOrigHtml) {
-        welcomeName.innerHTML = welcomeName.dataset.researchOrigHtml;
-        delete welcomeName.dataset.researchOrigHtml;
-      }
-      if (welcomeSub && welcomeSub.dataset.researchOrigText) {
-        welcomeSub.textContent = welcomeSub.dataset.researchOrigText;
-        delete welcomeSub.dataset.researchOrigText;
-      }
-      if (tipEl && tipEl.dataset.researchOrigTip) {
-        tipEl.textContent = tipEl.dataset.researchOrigTip;
-        tipEl.style.opacity = '';
-        tipEl.style.display = '';
-        delete tipEl.dataset.researchOrigTip;
-      }
-      // Restore Nobody toggle
-      const _incBtn2 = el('incognito-btn');
-      if (_incBtn2 && _incBtn2.dataset.researchOrigDisplay !== undefined) {
-        _incBtn2.style.display = _incBtn2.dataset.researchOrigDisplay;
-        delete _incBtn2.dataset.researchOrigDisplay;
-      }
-    }
-    if (ws) { ws.style.animation = 'none'; ws.offsetHeight; ws.style.animation = 'welcome-enter 0.3s ease-out both'; }
   }
 
   // ── Close compare if active (used by all tool/sidebar activations) ──
@@ -1029,12 +1383,11 @@ function initializeEventListeners() {
   // Document library tool button
   const toolDoclibBtn = el('tool-doclib-btn');
   if (toolDoclibBtn) {
-    toolDoclibBtn.addEventListener('click', () => {
+    toolDoclibBtn.addEventListener('click', async () => {
       if (_closeCompareIfActive()) return;
       if (documentModule) {
-        if (documentModule.isLibraryOpen()) {
-          documentModule.closeLibrary();
-        } else {
+        const Modals = await import('./js/modalManager.js');
+        if (!Modals.toggle('doclib-modal')) {
           documentModule.openLibrary();
         }
       }
@@ -1063,11 +1416,20 @@ function initializeEventListeners() {
     btn.addEventListener("click", () => {
     });
   });
-    toolTasksBtn.addEventListener('click', () => {
+    toolTasksBtn.addEventListener('click', async () => {
       if (tasksModule) {
-        tasksModule.isTasksOpen() ? tasksModule.closeTasks() : tasksModule.openTasks();
+        const Modals = await import('./js/modalManager.js');
+        if (!Modals.toggle('tasks-modal')) {
+          tasksModule.openTasks();
+        }
       }
     });
+  }
+
+  // Android connection mode
+  const toolConnectBtn = el('tool-connect-btn');
+  if (toolConnectBtn) {
+    toolConnectBtn.addEventListener('click', openAndroidConnectionMode);
   }
 
   // Calendar tool button
@@ -1396,7 +1758,10 @@ function initializeEventListeners() {
       sortDropdown.querySelectorAll('.sort-option').forEach(o => {
         const check = o.querySelector('.sort-check') || document.createElement('span');
         check.className = 'sort-check';
-        check.style.cssText = 'float:right;font-size:20px;line-height:1;position:relative;top:1px;color:var(--accent, var(--red));opacity:' + (o.dataset.sort === current ? '1' : '0');
+        const active = o.dataset.sort === current;
+        o.classList.toggle('active', active);
+        o.setAttribute('aria-checked', active ? 'true' : 'false');
+        check.style.cssText = 'margin-left:auto;font-size:18px;line-height:1;color:var(--accent, var(--red));opacity:' + (active ? '1' : '0');
         check.textContent = '\u2022';
         if (!o.querySelector('.sort-check')) o.appendChild(check);
       });
@@ -1425,7 +1790,7 @@ function initializeEventListeners() {
         const data = await res.json();
         if (!res.ok) throw new Error(data.detail || 'Auto-sort failed');
         if (data.status === 'ok') {
-          sessionModule.setSortMode(null); // clear sort — tidy creates manual folder order
+          sessionModule.setSortMode('group');
           _syncSortChecks();
           if (skipLlm) {
             // No-AI path: just report what got cleaned. No "unfiled
@@ -2036,11 +2401,13 @@ function initializeEventListeners() {
       }
       menu.style.top = (r.top - 8 - h) + 'px';
     }
-    // Tapping the chevron must NOT steal focus from the message box, or the
-    // mobile keyboard collapses. preventDefault on pointerdown keeps the
-    // textarea focused (keyboard stays up) while click still opens the menu.
-    plusBtn.addEventListener('pointerdown', (e) => { e.preventDefault(); });
-    plusBtn.addEventListener('click', (e) => {
+    // Tapping the chevron is an explicit tools-menu action. Close the soft
+    // keyboard first so Android does not pan the whole WebView under the menu.
+    plusBtn.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      dismissSoftKeyboard();
+    });
+    plusBtn.addEventListener('click', async (e) => {
       e.stopPropagation();
       // Closing path needs to play the fold-in animation, not just flip
       // .hidden — route through closeOverflowMenu so the second-click
@@ -2050,6 +2417,10 @@ function initializeEventListeners() {
         closeOverflowMenu();
         return;
       }
+      const dismissedKeyboard = dismissSoftKeyboard();
+      if (dismissedKeyboard) {
+        await new Promise(resolve => setTimeout(resolve, keyboardDismissSettleDelay()));
+      }
       // Re-opening while a fold-in is mid-animation: cancel it cleanly.
       menu.classList.remove('closing');
       menu.classList.remove('hidden');
@@ -2057,9 +2428,8 @@ function initializeEventListeners() {
       document.body.appendChild(menu);  // escape the composer's container-type trap
       // Hide pill bar label so it doesn't show through the menu
       if (pickerWrap) pickerWrap.style.visibility = 'hidden';
-      // Keep the textarea focused so the keyboard stays up if it was open (the
-      // pointerdown handler above prevents the focus-steal). Still watch
-      // visualViewport so the menu follows the chevron if the viewport shifts.
+      // Watch visualViewport so the menu follows the chevron while the keyboard
+      // finishes dismissing or if the viewport shifts.
       positionMenu();
       if (window.visualViewport && !_vvReposition) {
         _vvReposition = () => positionMenu();
@@ -2485,7 +2855,9 @@ function initializeEventListeners() {
         incognitoBtn.innerHTML = INCOGNITO_EYE_CLOSED + '<span class="incognito-label">Nobody</span>';
         if (welcomeName) {
           welcomeName.dataset.originalHtml = welcomeName.innerHTML;
+          welcomeName.dataset.originalDataText = welcomeName.dataset.text || 'Odysseus';
           welcomeName.innerHTML = '<svg class="welcome-boat" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><line x1="8" y1="16" x2="16" y2="8"/><line x1="8" y1="8" x2="16" y2="16"/></svg>Nobody';
+          welcomeName.dataset.text = 'Nobody';
           // Restart the L→R clip-wipe reveal on the new label
           welcomeName.style.animation = 'none';
           welcomeName.offsetHeight;
@@ -2534,6 +2906,9 @@ function initializeEventListeners() {
         incognitoBtn.innerHTML = INCOGNITO_EYE_OPEN + '<span class="incognito-label">Nobody</span>';
         if (welcomeName && welcomeName.dataset.originalHtml) {
           welcomeName.innerHTML = welcomeName.dataset.originalHtml;
+          welcomeName.dataset.text = welcomeName.dataset.originalDataText || 'Odysseus';
+          delete welcomeName.dataset.originalHtml;
+          delete welcomeName.dataset.originalDataText;
           // Restart the L→R clip-wipe reveal on the restored label
           welcomeName.style.animation = 'none';
           welcomeName.offsetHeight;
@@ -2620,6 +2995,7 @@ function initializeEventListeners() {
     'tool-memory':         '#tool-memory-btn',
     'tool-notes':          '#tool-notes-btn',
     'tool-tasks':          '#tool-tasks-btn',
+    'tool-connect':        '#tool-connect-btn, #rail-connect',
     'tool-theme':          '#tool-theme-btn',
     'user-bar':            '#user-bar-profile',
     'sidebar-settings-btn':'#user-bar-settings',
@@ -2656,7 +3032,7 @@ function initializeEventListeners() {
     Object.entries(UI_VIS_MAP).forEach(([key, selector]) => {
       // section-drag-reorder uses a body class instead of inline styles
       if (key === 'section-drag-reorder') return;
-      const visible = key in state ? state[key] !== false : !UI_VIS_DEFAULT_OFF.has(key);
+      let visible = key in state ? state[key] !== false : !UI_VIS_DEFAULT_OFF.has(key);
       document.querySelectorAll(selector).forEach(el => {
         el.style.display = visible ? '' : 'none';
       });
@@ -2923,18 +3299,24 @@ function initializeEventListeners() {
           enableDock: false,
           enableResize: false,
         });
+        const resetDialogGeometry = () => {
+          m.classList.remove('modal-left-docked', 'modal-right-docked', 'email-snap-left', 'minimized', 'modal-minimized');
+          delete content.dataset._tileZone;
+          delete content.dataset._tilePreSnap;
+          [
+            'position', 'left', 'top', 'right', 'bottom', 'width', 'height',
+            'max-width', 'max-height', 'border-radius', 'transform', 'margin',
+          ].forEach((prop) => content.style.removeProperty(prop));
+          if (id === 'rename-session-modal') content.style.width = '400px';
+          m.querySelector('.minimize-btn')?.remove();
+        };
         // Re-center on open (these persist in the DOM). Guard on the
         // hidden→visible edge so it never fires mid-drag.
         let wasHidden = m.classList.contains('hidden');
         new MutationObserver(() => {
           const isHidden = m.classList.contains('hidden');
           if (wasHidden && !isHidden) {
-            content.style.position = '';
-            content.style.left = '';
-            content.style.top = '';
-            content.style.right = '';
-            content.style.bottom = '';
-            content.style.margin = '';
+            resetDialogGeometry();
           }
           wasHidden = isHidden;
         }).observe(m, { attributes: true, attributeFilter: ['class'] });
@@ -2951,7 +3333,7 @@ function initializeEventListeners() {
     // custom-preset-modal (the Prompt window) is handled by the new
     // modalManager dock (registered in _AUTO_WIRE), so the legacy dock must
     // not also inject a `_`/chip for it.
-    const SKIP_IDS = new Set(['styled-confirm-overlay', 'custom-preset-modal']);
+    const SKIP_IDS = new Set(['styled-confirm-overlay', 'custom-preset-modal', 'rename-session-modal', 'gallery-modal']);
     const dockEntries = new Map(); // modal element -> dock entry element
 
     let dock = document.getElementById('modal-dock');
@@ -3062,6 +3444,7 @@ function initializeEventListeners() {
     function injectMinimizeButton(modal) {
       if (!modal || !modal.classList || !modal.classList.contains('modal')) return;
       if (modal.id && SKIP_IDS.has(modal.id)) return;
+      if (modal.dataset?.legacyMinimize === 'off') return;
       // Modals managed by the new modalManager (Modals.register) get their own
       // .modal-minimize-btn and chips via the .minimized-dock-chip system.
       // Skip them entirely so we don't double-up minimize buttons or chips.
@@ -3328,9 +3711,18 @@ function initializeEventListeners() {
   // Textarea auto-resize
   const textarea = el('message');
   if (textarea) {
+    const CHAR_LIMIT = 50000;
+    const charCountBadge = el('char-count-badge');
+    const updateCharCount = () => {
+      if (!charCountBadge) return;
+      const count = (textarea.value || '').length;
+      charCountBadge.textContent = `${count.toLocaleString()} / ${CHAR_LIMIT.toLocaleString()}`;
+      charCountBadge.classList.toggle('visible', count >= CHAR_LIMIT * 0.8);
+    };
     _syncMobileEnterKeyHint(textarea);
     window.addEventListener('odysseus:chat-busy-change', () => _syncMobileEnterKeyHint(textarea));
     uiModule.autoResize(textarea);
+    updateCharCount();
     let previousTextareaValue = textarea.value || '';
     textarea.addEventListener('beforeinput', (e) => {
       if (_isLineBreakInputEvent(e) && _shouldQueueFromMobileLineBreak(textarea)) {
@@ -3352,6 +3744,7 @@ function initializeEventListeners() {
       previousTextareaValue = currentValue;
       uiModule.autoResize(textarea);
       _syncMobileEnterKeyHint(textarea);
+      updateCharCount();
     });
     textarea.addEventListener('paste', () => {
       setTimeout(() => uiModule.autoResize(textarea), 1);
@@ -3652,17 +4045,18 @@ function startOdysseusApp() {
 
   // Rail tool buttons — delegate to sidebar tool buttons
   const _railToolMap = {
-    'rail-compare':   'tool-compare-btn',
-    'rail-research':  'tool-research-btn',
-    'rail-cookbook':   'tool-cookbook-btn',
-    'rail-archive':   'tool-library-btn',
-    'rail-gallery':   'tool-gallery-btn',
-    'rail-tasks':     'tool-tasks-btn',
-    'rail-calendar':  'tool-calendar-btn',
-    'rail-notes':     'tool-notes-btn',
     'rail-memory':    'tool-memory-btn',
-    'rail-theme':     'tool-theme-btn',
+    'rail-calendar':  'tool-calendar-btn',
+    'rail-compare':   'tool-compare-btn',
+    'rail-connect':   'tool-connect-btn',
+    'rail-cookbook':   'tool-cookbook-btn',
+    'rail-research':  'tool-research-btn',
     'rail-email':     'email-section-title',
+    'rail-gallery':   'tool-gallery-btn',
+    'rail-archive':   'tool-library-btn',
+    'rail-notes':     'tool-notes-btn',
+    'rail-tasks':     'tool-tasks-btn',
+    'rail-theme':     'tool-theme-btn',
   };
   Object.entries(_railToolMap).forEach(([railId, toolId]) => {
     const railBtn = el(railId);
@@ -3768,6 +4162,11 @@ function startOdysseusApp() {
     // Release after a short delay (stream start sets its own isStreaming guard)
     setTimeout(() => { _submitting = false; }, 300);
 
+    // ── Particle burst from send button ──
+    const sendBtn = document.querySelector('.send-btn');
+    const hasSubmitContent = !!(_messageInput?.value.trim() || _hasAttachments());
+    if (sendBtn && hasSubmitContent) uiModule.particleBurst(sendBtn);
+
     // Compare mode: route submit to compare handler (same message to all panes)
     if (compareModule && compareModule.isActive()) {
       return compareModule.handleCompareSubmit(e);
@@ -3783,6 +4182,7 @@ function startOdysseusApp() {
       chatRenderer.hideWelcomeScreen();
       chatRenderer.addMessage('user', msg);
       msgInput.value = '';
+      msgInput.dispatchEvent(new Event('input', { bubbles: true }));
       groupModule.sendMessage(msg);
       return;
     }
@@ -4107,6 +4507,8 @@ function startOdysseusApp() {
     if (files.length === 0) return;
     await fileHandlerModule.addFiles(files);
 
+    fileHandlerModule.addFiles(files);
+    fileHandlerModule.renderAttachStrip();
     uiModule.showToast(`Added ${files.length} file${files.length > 1 ? 's' : ''} to chat`);
 
   });
@@ -4382,8 +4784,22 @@ function startOdysseusApp() {
   }
 }
 
+// ── Live sidebar clock ──
+function _initSidebarClock() {
+  const clockEl = document.getElementById('sidebar-clock');
+  if (!clockEl) return;
+  const tick = () => {
+    const now = new Date();
+    clockEl.textContent = now.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  };
+  tick();
+  setInterval(tick, 60000);
+}
+
 if (document.readyState === 'loading') {
   document.addEventListener('DOMContentLoaded', startOdysseusApp, { once: true });
+  document.addEventListener('DOMContentLoaded', _initSidebarClock, { once: true });
 } else {
   startOdysseusApp();
+  _initSidebarClock();
 }

@@ -3,6 +3,68 @@
 
 import Storage from './storage.js';
 
+function isOdysseusAndroidWebView() {
+  return /OdysseusAndroid\/\d+/i.test(navigator.userAgent || '')
+    || typeof window.OdysseusAndroid !== 'undefined';
+}
+
+function initAndroidKeyboardInsets() {
+  if (!isOdysseusAndroidWebView()) return;
+  const root = document.documentElement;
+  root.classList.add('android-webview');
+
+  let scheduled = false;
+  let lastInset = -1;
+
+  const apply = () => {
+    scheduled = false;
+    const vv = window.visualViewport;
+    const layoutHeight = window.innerHeight || root.clientHeight || 0;
+    const rawInset = vv
+      ? Math.max(0, layoutHeight - vv.height - Math.max(0, vv.offsetTop || 0))
+      : 0;
+    const inset = rawInset > 80 ? Math.round(rawInset) : 0;
+    if (inset === lastInset) return;
+    lastInset = inset;
+    root.style.setProperty('--android-keyboard-inset', `${inset}px`);
+    root.classList.toggle('android-keyboard-open', inset > 0);
+    try {
+      window.dispatchEvent(new CustomEvent('odysseus:keyboard-inset-change', {
+        detail: { inset },
+      }));
+      window.dispatchEvent(new Event('resize'));
+    } catch (_) {
+      window.dispatchEvent(new Event('resize'));
+    }
+    if (inset > 0) {
+      const chatHistory = document.getElementById('chat-history');
+      if (chatHistory) {
+        requestAnimationFrame(() => {
+          chatHistory.scrollTop = chatHistory.scrollHeight;
+        });
+      }
+    }
+  };
+
+  const schedule = () => {
+    if (scheduled) return;
+    scheduled = true;
+    requestAnimationFrame(apply);
+  };
+
+  if (window.visualViewport) {
+    window.visualViewport.addEventListener('resize', schedule);
+    window.visualViewport.addEventListener('scroll', schedule);
+  }
+  window.addEventListener('resize', schedule);
+  window.addEventListener('orientationchange', () => setTimeout(schedule, 250));
+  document.addEventListener('focusin', schedule);
+  document.addEventListener('focusout', () => setTimeout(schedule, 220));
+  schedule();
+}
+
+initAndroidKeyboardInsets();
+
 function clearFreshComposerRestore() {
   const msgInput = document.getElementById('message');
   if (!msgInput) return;
@@ -82,9 +144,15 @@ window.addEventListener('pageshow', clearFreshComposerRestore);
    places caused two toggles per click, which read as "clicks aren't doing
    anything" (even-count parity). Keep only the initial-state-apply here. */
 {
-  const KEY = Storage.KEYS.SIDEBAR_COLLAPSED;
+  const KEY = 'section-collapsed';
   const saved = Storage.getJSON(KEY, {});
-  const _defaultCollapsed = { 'sessions-section': true };
+  const restoredChatsKey = 'odysseus-chats-tree-restored-v1';
+  if (!Storage.get(restoredChatsKey)) {
+    saved['sessions-section'] = false;
+    Storage.setJSON(KEY, saved);
+    Storage.set(restoredChatsKey, '1');
+  }
+  const _defaultCollapsed = {};
   document.querySelectorAll('.sidebar .section').forEach((section) => {
     const id = section.id;
     if (!id) return;
@@ -175,30 +243,114 @@ window.addEventListener('pageshow', clearFreshComposerRestore);
   const chatBar = document.querySelector('.chat-input-bar');
   const attachStrip = document.getElementById('attach-strip');
   const chatContainer = document.getElementById('chat-container');
+  const watchedDocks = typeof WeakSet !== 'undefined' ? new WeakSet() : null;
+  let dockResizeObserver = null;
+  let composerClearanceRaf = 0;
+  const COMPOSER_DOCK_GAP = 4;
+  const COLLAPSED_OVERLAY_HISTORY_GAP = 4;
+  const TOUCH_DOCK_HISTORY_RATIO = 0.75;
+  const _uiScaleFactor = () => {
+    const n = parseFloat(window.getComputedStyle(root).getPropertyValue('--ui-scale-factor') || '');
+    return Number.isFinite(n) && n > 0 ? n : 1;
+  };
+  const _setRootPxIfChanged = (name, value) => {
+    const next = value + 'px';
+    if (root.style.getPropertyValue(name) !== next) {
+      root.style.setProperty(name, next);
+    }
+  };
+  const _toggleBodyClassIfChanged = (name, on) => {
+    if (document.body.classList.contains(name) !== !!on) {
+      document.body.classList.toggle(name, !!on);
+    }
+  };
+  const _isTouchDockViewport = () => window.innerWidth <= 768
+    || window.matchMedia('(pointer: coarse)').matches
+    || window.matchMedia('(hover: none)').matches
+    || navigator.maxTouchPoints > 0;
+  const _visibleDockHeight = (dock) => {
+    if (!dock) return 0;
+    const hasItems = dock.children && dock.children.length > 0;
+    if (!hasItems) return 0;
+    const cs = window.getComputedStyle(dock);
+    if (cs.display === 'none' || cs.visibility === 'hidden') return 0;
+    const rect = dock.getBoundingClientRect();
+    const touchDock = dock.id === 'minimized-dock' && _isTouchDockViewport();
+    const reserveHeight = touchDock ? rect.height * TOUCH_DOCK_HISTORY_RATIO : rect.height;
+    return rect.height > 0
+      ? Math.ceil((reserveHeight + COLLAPSED_OVERLAY_HISTORY_GAP) / _uiScaleFactor())
+      : 0;
+  };
+  const _watchDock = (dock) => {
+    if (!dock || (watchedDocks && watchedDocks.has(dock))) return;
+    if (watchedDocks) watchedDocks.add(dock);
+    if (dockResizeObserver) dockResizeObserver.observe(dock);
+    if (typeof MutationObserver !== 'undefined') {
+      new MutationObserver(_queueComposerClearanceSync).observe(dock, {
+        childList: true,
+      });
+    }
+  };
+  const _watchCurrentDocks = () => {
+    _watchDock(document.getElementById('minimized-dock'));
+    _watchDock(document.getElementById('modal-dock'));
+  };
+  const _queueComposerClearanceSync = () => {
+    if (composerClearanceRaf) return;
+    composerClearanceRaf = requestAnimationFrame(() => {
+      composerClearanceRaf = 0;
+      _syncComposerClearance();
+    });
+  };
   const _syncComposerClearance = () => {
+    _watchCurrentDocks();
     let top = window.innerHeight;
     for (const el of [attachStrip, chatBar]) {
       if (!el) continue;
       const rect = el.getBoundingClientRect();
       if (rect.height > 0) top = Math.min(top, rect.top);
     }
-    const clearance = Math.max(12, Math.ceil(window.innerHeight - top + 8));
-    root.style.setProperty('--composer-clearance', clearance + 'px');
+    const clearance = Math.max(
+      8,
+      Math.ceil((window.innerHeight - top + COMPOSER_DOCK_GAP) / _uiScaleFactor()),
+    );
+    _setRootPxIfChanged('--composer-clearance', clearance);
+    const collapsedOverlaySpace = Math.max(
+      _visibleDockHeight(document.getElementById('minimized-dock')),
+      _visibleDockHeight(document.getElementById('modal-dock')),
+    );
+    _setRootPxIfChanged('--collapsed-overlay-space', collapsedOverlaySpace);
+    _toggleBodyClassIfChanged('has-collapsed-overlays', collapsedOverlaySpace > 0);
   };
-  requestAnimationFrame(_syncComposerClearance);
+  _queueComposerClearanceSync();
   if (typeof ResizeObserver !== 'undefined') {
-    const ro = new ResizeObserver(_syncComposerClearance);
+    const ro = new ResizeObserver(_queueComposerClearanceSync);
     if (chatBar) ro.observe(chatBar);
     if (attachStrip) ro.observe(attachStrip);
+    // Top/bottom modal docking moves the composer by resizing the chat shell;
+    // the bar's own border-box does not change, so observing only the bar left
+    // --composer-clearance stuck at the old split seam after minimize.
+    if (chatContainer) ro.observe(chatContainer);
+    dockResizeObserver = new ResizeObserver(_queueComposerClearanceSync);
+    _watchCurrentDocks();
   }
   if (chatContainer && typeof MutationObserver !== 'undefined') {
-    new MutationObserver(_syncComposerClearance).observe(chatContainer, {
+    new MutationObserver(_queueComposerClearanceSync).observe(chatContainer, {
       attributes: true,
       attributeFilter: ['class'],
     });
   }
-  if (chatBar) chatBar.addEventListener('transitionend', _syncComposerClearance);
-  window.addEventListener('resize', _syncComposerClearance);
+  if (typeof MutationObserver !== 'undefined') {
+    _watchCurrentDocks();
+    new MutationObserver(_queueComposerClearanceSync).observe(document.body, {
+      childList: true,
+      attributes: true,
+      attributeFilter: ['class'],
+    });
+  }
+  if (chatBar) chatBar.addEventListener('transitionend', _queueComposerClearanceSync);
+  window.addEventListener('odysseus:minimized-dock-rendered', _queueComposerClearanceSync);
+  window.addEventListener('resize', _queueComposerClearanceSync);
 }
 
 /* ---- Resizable sidebar — drag edge to resize, collapse if small, drag rail edge to expand ---- */

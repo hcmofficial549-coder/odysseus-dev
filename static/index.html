@@ -32,6 +32,16 @@
         // app boots and applyColors() fills --brand-color.
         var _bc = (c.advanced && c.advanced.brandColor) || c.red;
         if (_bc) s.setProperty('--brand-color', _bc);
+        var _ap = (c.advanced && c.advanced.accentPrimary) || c.cyan;
+        if (_ap) {
+          s.setProperty('--color-accent', _ap);
+          s.setProperty('--accent-primary', _ap);
+        }
+        var _aw = (c.advanced && c.advanced.accentWarm) || c.warm;
+        if (_aw) {
+          s.setProperty('--accent-warm', _aw);
+          s.setProperty('--warn', _aw);
+        }
         // Match the mobile browser toolbar / status bar to the saved theme bg
         // from the very first paint. Otherwise the hardcoded dark meta sits
         // there during load and the bar "switches" colour once the app boots.
@@ -88,7 +98,8 @@
       // of the active theme) so there's no flash on load.
       try {
         var _us = localStorage.getItem('odysseus-ui-scale');
-        if (_us && _us !== '100') document.documentElement.classList.add('ui-scale-' + _us);
+        var _allowedUiScales = { '90': 1, '100': 1, '110': 1, '125': 1, '140': 1 };
+        if (_allowedUiScales[_us] && _us !== '100') document.documentElement.classList.add('ui-scale-' + _us);
       } catch(e){}
       // Apply background pattern on body once available
       if (t && t.bgPattern && t.bgPattern !== 'none') {
@@ -601,14 +612,26 @@
           <div class="theme-fd-group">
             <label class="theme-fd-label">Text size</label>
             <select id="theme-text-size-select" class="theme-fd-select" aria-label="Text size">
+              <option value="90">Smaller</option>
               <option value="100">Default</option>
+              <option value="110">Large</option>
               <option value="125">Larger</option>
+              <option value="140">Largest</option>
             </select>
           </div>
+        </div>
+        <div class="theme-fd-row">
           <div class="theme-fd-group" id="theme-frosted-group">
             <label class="theme-fd-label" for="theme-frosted-toggle">Frosted</label>
             <label class="admin-switch" style="margin-top:4px;">
               <input type="checkbox" id="theme-frosted-toggle">
+              <span class="admin-slider"></span>
+            </label>
+          </div>
+          <div class="theme-fd-group" id="theme-cursor-trail-group">
+            <label class="theme-fd-label" for="theme-cursor-trail-toggle">Cursor FX</label>
+            <label class="admin-switch" style="margin-top:4px;">
+              <input type="checkbox" id="theme-cursor-trail-toggle">
               <span class="admin-slider"></span>
             </label>
           </div>
@@ -626,6 +649,7 @@
               <option value="petals">Petals</option>
               <option value="sparkles">Sparkles</option>
               <option value="embers">Embers</option>
+              <option value="aurora">Aurora</option>
             </select>
           </div>
           <div class="theme-fd-group" style="flex:0 0 auto;align-items:center;">
@@ -684,15 +708,16 @@
     <!-- Dynamic contextual indicators (shown only while active) -->
     <button class="icon-rail-btn rail-dynamic" id="rail-chats" title="Chat ready" style="display:none"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></button>
     <button class="icon-rail-btn rail-dynamic" id="rail-documents" title="Documents" style="display:none"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="13" y2="17"/></svg></button>
-    <!-- Tool launchers — always visible, alphabetical -->
+    <!-- Tool launchers — always visible, alphabetical by label -->
+    <button class="icon-rail-btn" id="rail-memory" title="Brain"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/><path d="M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4"/></svg></button>
     <button class="icon-rail-btn" id="rail-calendar" title="Calendar"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg></button>
     <button class="icon-rail-btn" id="rail-compare" title="Compare"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M13 6h3a2 2 0 0 1 2 2v7"/><path d="M11 18H8a2 2 0 0 1-2-2V9"/></svg></button>
+    <button class="icon-rail-btn" id="rail-connect" title="Connect" style="display:none"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l2-2a5 5 0 0 0-7.07-7.07l-1.15 1.15"/><path d="M14 11a5 5 0 0 0-7.54-.54l-2 2a5 5 0 0 0 7.07 7.07l1.15-1.15"/></svg></button>
     <button class="icon-rail-btn" id="rail-cookbook" title="Cookbook"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" style="opacity:0.7"><path d="M12 7v14"/><path d="M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/></svg></button>
     <button class="icon-rail-btn" id="rail-research" title="Deep Research"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg></button>
     <button class="icon-rail-btn" id="rail-email" title="Email"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/></svg></button>
     <button class="icon-rail-btn" id="rail-gallery" title="Gallery"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg></button>
     <button class="icon-rail-btn" id="rail-archive" title="Library"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/><path d="M9 7h6M9 11h4"/></svg></button>
-    <button class="icon-rail-btn" id="rail-memory" title="Brain"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/><path d="M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4"/></svg></button>
     <button class="icon-rail-btn" id="rail-notes" title="Notes"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3h10l4 4v14H5z"/><path d="M15 3v5h5"/><path d="M8 17.5 15.5 10l2.5 2.5L10.5 20H8z"/></svg></button>
     <button class="icon-rail-btn" id="rail-tasks" title="Tasks"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/><path d="M9 16l2 2 4-4"/></svg></button>
     <button class="icon-rail-btn" id="rail-theme" title="Theme"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 2a10 10 0 0 0 0 20 5 5 0 0 0 5-5 3 3 0 0 0-3-3h-2a3 3 0 0 1-3-3 5 5 0 0 1 5-5"/></svg></button>
@@ -708,6 +733,7 @@
       <div class="sidebar-brand" id="sidebar-brand-btn" style="cursor:pointer;" title="New chat">
         <span class="sidebar-brand-title">Odysseus</span>
       </div>
+      <span class="sidebar-clock" id="sidebar-clock" title="Current time"></span>
     </div>
     <div class="sidebar-inner">
       <div class="list-item" id="sidebar-new-chat-btn" title="New chat">
@@ -725,7 +751,7 @@
 
       <div class="section" id="sessions-section">
         <div class="section-header-flex">
-          <span class="section-title" id="chats-section-title"><svg class="section-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg><span id="chats-section-label" class="section-title-label">Chats</span><span id="chats-notif-dot" class="sidebar-notif-dot" style="display:none"></span></span>
+          <span class="section-title" id="chats-section-title"><span class="chats-tree-chevron" aria-hidden="true"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></span><svg class="section-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg><span id="chats-section-label" class="section-title-label">Chats</span><span id="chats-notif-dot" class="sidebar-notif-dot" style="display:none"></span></span>
           <div style="position:relative; display:inline-block; display:flex; gap:4px; align-items:center;">
             <button type="button" class="section-header-btn list-item-plus-btn chats-manage-btn" id="chats-library-btn" title="Manage Chats (Library)">
               <span aria-hidden="true" style="display:inline-block;width:13px;height:13px;"></span>
@@ -743,12 +769,13 @@
             </button>
             <div id="session-sort-dropdown" class="dropdown sort-dropdown" style="display:none;">
               <div class="dropdown-item sort-option sort-dropdown-item" data-sort="active">Last Active</div>
+              <div class="dropdown-item sort-option sort-dropdown-item" data-sort="date">By Date</div>
               <div class="dropdown-item sort-option sort-dropdown-item" data-sort="newest">Newest First</div>
               <div class="dropdown-item sort-option sort-dropdown-item" data-sort="group">By Folder</div>
               <div class="dropdown-item sort-dropdown-item sort-dropdown-sep" id="auto-sort-sessions-row" style="display:flex;align-items:center;padding:0;">
                 <span id="auto-sort-sessions-btn" style="flex:1;padding:5px 10px 5px 4px;cursor:pointer;display:inline-flex;align-items:center;gap:6px;">
                   <span class="auto-sort-icon"><svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor" style="vertical-align:-1px;"><path d="M12 0L14.59 8.41L23 12L14.59 15.59L12 24L9.41 15.59L1 12L9.41 8.41Z"/></svg></span>
-                  <span>Group</span>
+                  <span>AI Grouping</span>
                   <span class="auto-sort-spinner" style="display:none;">Sorting...</span>
                 </span>
               </div>
@@ -861,6 +888,15 @@
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;opacity:0.5;"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M13 6h3a2 2 0 0 1 2 2v7"/><path d="M11 18H8a2 2 0 0 1-2-2V9"/></svg>
           <span class="grow">Compare</span>
         </div>
+        <div class="list-item" id="tool-connect-btn" style="display:none;" title="Connection mode">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+            style="flex-shrink:0;opacity:0.5;">
+            <path d="M10 13a5 5 0 0 0 7.54.54l2-2a5 5 0 0 0-7.07-7.07l-1.15 1.15"/>
+            <path d="M14 11a5 5 0 0 0-7.54-.54l-2 2a5 5 0 0 0 7.07 7.07l1.15-1.15"/>
+          </svg>
+          <span class="grow">Connect</span>
+        </div>
         <div class="list-item" id="tool-cookbook-btn">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
             stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"
@@ -957,7 +993,7 @@
       <button type="button" class="incognito-indicator" id="incognito-indicator" title="Nobody mode active — click to deactivate" style="display:none;"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><line x1="8" y1="16" x2="16" y2="8"/><line x1="8" y1="8" x2="16" y2="16"/></svg></button>
       <div class="chat-meta-overlay"><span id="current-meta">Odysseus Chat</span><span id="current-meta-count" class="chat-meta-count" aria-hidden="true"></span><span id="session-cost-display" class="session-cost-display" style="display:none;"></span><span class="export-dropdown-wrap" id="export-dropdown-wrap"><button type="button" class="export-dl-btn" id="export-dl-btn" title="More"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></button><div class="export-dropdown-menu" id="export-dropdown-menu"><div class="export-dropdown-item" id="export-rename-btn"><span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg></span><span>Rename</span></div><div class="export-dropdown-item" id="export-copy-btn"><span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></span><span>Copy Chat</span></div><div class="export-dropdown-item" id="export-pdf-btn"><span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><path d="M9 15v-2h2a1.5 1.5 0 0 1 0 3H9z"/></svg></span><span>PDF</span></div><div class="export-dropdown-item" id="export-doc-btn"><span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg></span><span>Save to Documents</span></div></div></span></div>    </div>
     <div id="welcome-screen">
-      <div class="welcome-name"><svg class="welcome-boat" viewBox="0 0 32 32"><path d="M16 4L16 22L6 22Z" fill="currentColor"/><path d="M16 8L16 22L24 22Z" fill="currentColor" opacity="0.6"/><path d="M4 24Q10 20 16 24Q22 28 28 24" stroke="currentColor" stroke-width="2.5" fill="none" stroke-linecap="round"/></svg>Odysseus</div>
+      <div class="welcome-name" data-text="Odysseus"><svg class="welcome-boat" viewBox="0 0 32 32"><path d="M16 4L16 22L6 22Z" fill="currentColor"/><path d="M16 8L16 22L24 22Z" fill="currentColor" opacity="0.6"/><path d="M4 24Q10 20 16 24Q22 28 28 24" stroke="currentColor" stroke-width="2.5" fill="none" stroke-linecap="round"/></svg>Odysseus</div>
       <div class="welcome-sub" id="welcome-sub">Welcome, <span class="setup-trigger-link" style="color:var(--accent,var(--red));font-weight:600;cursor:pointer;text-decoration:underline;" title="Click to launch setup">type /setup</span> to get started.</div>
       <div class="welcome-tip" id="welcome-tip"></div>
       <button type="button" class="incognito-btn" id="incognito-btn" title="Enable Nobody mode — no memory, no history saved">
@@ -973,22 +1009,6 @@
     </div>
     <script nonce="{{CSP_NONCE}}">
     (function(){
-      var mobile = window.matchMedia('(max-width: 768px)').matches;
-      var desktop = [
-        'Tip: Press Ctrl+K to search across all your conversations.',
-        'Tip: Press Ctrl+B to quickly toggle the sidebar.',
-        'Tip: Shift-click the sidebar toggle to swap it to the other side.',
-        'Tip: Drag and drop files onto the chat to attach them.',
-        'Tip: Right-click a session for rename, delete, and memory options.',
-      ];
-      var phone = [
-        'Tip: Long-press a session for rename, delete, and memory options.',
-        'Tip: Tap the eye icon for Nobody mode — no history saved.',
-        'Tip: Switch to Agent mode for web search and code execution.',
-        'Tip: Use Compare mode to test different models side by side.',
-        'Tip: Attach images or files using the + button next to the input.',
-      ];
-      var tips = mobile ? phone : desktop;
       var el = document.getElementById('welcome-tip');
       if (el) {
         el.textContent = 'Type /setup, then choose Local models or API.';
@@ -998,7 +1018,14 @@
       }).catch(function(){});
     })();
     </script>
-    <div id="chat-history" class="chat-history" role="log" aria-live="polite"></div>
+    <div id="chat-history" class="chat-history" role="log" aria-live="polite">
+      <div class="chat-history-scroll-progress" aria-hidden="true"></div>
+      <div class="ai-typing-indicator" aria-label="AI is responding" role="status">
+        <span class="ai-typing-dot"></span>
+        <span class="ai-typing-dot"></span>
+        <span class="ai-typing-dot"></span>
+      </div>
+    </div>
 
     <!-- Attachments strip -->
     <div id="attach-strip" class="attach-strip"></div>
@@ -1013,7 +1040,8 @@
     <div class="chat-input-bar">
       <div class="chat-input-top">
         <div id="message-ghost" class="ghost-text-overlay" aria-hidden="true"></div>
-        <textarea id="message" placeholder="Message Odysseus..." required autocomplete="off" aria-label="Message input" rows="1" autofocus></textarea>
+        <textarea id="message" placeholder="Message Odysseus..." required autocomplete="off" aria-label="Message input" maxlength="50000" rows="1" autofocus></textarea>
+        <span id="char-count-badge" aria-hidden="true"></span>
         <!-- Model picker (inside chatbox, top-right) -->
         <div class="model-picker-wrap" id="model-picker-wrap">
           <button type="button" class="model-picker-btn" id="model-picker-btn" title="Switch model"><span id="model-picker-label">Select model</span> <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 15 12 9 18 15"/></svg></button>
@@ -1242,7 +1270,7 @@
 
 
   </main>
-  <button id="scroll-bottom-btn" class="scroll-nav-btn" title="Scroll to bottom">▼</button>
+  <button type="button" id="scroll-bottom-btn" class="scroll-nav-btn" title="Scroll to bottom" aria-label="Scroll to bottom" aria-hidden="true" tabindex="-1">▼</button>
   <script nonce="{{CSP_NONCE}}">
   (function(){
     const container = document.getElementById('chat-history');
@@ -1260,7 +1288,10 @@
       reposition();
       const scrollable = container.scrollHeight > container.clientHeight + 10;
       const atBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 300;
-      if (scrollable && !atBottom) {
+      const visible = scrollable && !atBottom;
+      bottomBtn.tabIndex = visible ? 0 : -1;
+      bottomBtn.setAttribute('aria-hidden', visible ? 'false' : 'true');
+      if (visible) {
         bottomBtn.classList.remove('slide-out');
         bottomBtn.classList.add('show');
       } else if (bottomBtn.classList.contains('show')) {
@@ -1297,7 +1328,10 @@
       step();
       _scrollTimeout = setTimeout(() => { if (_scrollingToBottom) { container.scrollTop = target; _scrollingToBottom = false; } }, 1500);
     });
-    new ResizeObserver(reposition).observe(chatBar);
+    const layoutObserver = new ResizeObserver(reposition);
+    layoutObserver.observe(chatBar);
+    const chatShell = document.querySelector('.chat-container');
+    if (chatShell) layoutObserver.observe(chatShell);
     new MutationObserver(update).observe(container, {childList:true, subtree:true});
     window.addEventListener('resize', reposition);
     update();
@@ -1305,7 +1339,7 @@
   </script>
 
   <!-- Rename Session Modal -->
-  <div id="rename-session-modal" class="modal hidden">
+  <div id="rename-session-modal" class="modal hidden" data-edge-dock="off" data-legacy-minimize="off">
     <div class="modal-content" role="dialog" aria-label="Rename session" style="width: 400px;">
       <div class="modal-header">
         <h4>Rename Session</h4>
@@ -1774,6 +1808,11 @@
                 <input type="checkbox" checked data-ui-key="tool-compare"><span class="vis-switch"></span>
               </label>
               <label class="vis-row">
+                <span class="vis-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l2-2a5 5 0 0 0-7.07-7.07l-1.15 1.15"/><path d="M14 11a5 5 0 0 0-7.54-.54l-2 2a5 5 0 0 0 7.07 7.07l1.15-1.15"/></svg></span>
+                <span class="vis-label">Connect</span>
+                <input type="checkbox" checked data-ui-key="tool-connect"><span class="vis-switch"></span>
+              </label>
+              <label class="vis-row">
                 <span class="vis-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/><path d="M9 7h6M9 11h4"/></svg></span>
                 <span class="vis-label">Cookbook</span>
                 <input type="checkbox" checked data-ui-key="tool-cookbook"><span class="vis-switch"></span>
@@ -2071,6 +2110,91 @@
               <label class="admin-switch"><input type="checkbox" id="adm-shareDefaultsToggle"><span class="admin-slider"></span></label>
             </div>
           </div>
+          <div class="admin-card" id="adm-ldapCard">
+            <h2 style="display:flex;align-items:center;gap:8px;">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;opacity:0.6"><rect x="3" y="11" width="18" height="10" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+              LDAP / FreeIPA Login
+              <span id="adm-ldapSource" class="admin-badge admin-badge-muted hidden"></span>
+            </h2>
+            <div class="admin-toggle-row ldap-toggle-row">
+              <div>
+                <div class="admin-toggle-label">Directory authentication</div>
+                <div class="admin-toggle-sub">Allow LDAP or FreeIPA users to sign in alongside local accounts.</div>
+              </div>
+              <label class="admin-switch"><input type="checkbox" id="adm-ldapEnabled"><span class="admin-slider"></span></label>
+            </div>
+            <div class="ldap-settings-grid">
+              <label class="ldap-field ldap-field-wide">
+                <span>Server URI</span>
+                <input id="adm-ldapServerUri" class="settings-select" type="text" placeholder="ldaps://ipa.example.test">
+              </label>
+              <label class="ldap-field">
+                <span>Bind DN</span>
+                <input id="adm-ldapBindDn" class="settings-select" type="text" placeholder="uid=service,cn=users,cn=accounts,dc=example,dc=test">
+              </label>
+              <label class="ldap-field">
+                <span>Bind Password</span>
+                <input id="adm-ldapBindPassword" class="settings-select" type="password" placeholder="Leave blank to keep saved password">
+              </label>
+              <label class="ldap-field ldap-field-wide">
+                <span>User Base DN</span>
+                <input id="adm-ldapUserBaseDn" class="settings-select" type="text" placeholder="cn=users,cn=accounts,dc=example,dc=test">
+              </label>
+              <label class="ldap-field ldap-field-wide">
+                <span>User Filter</span>
+                <input id="adm-ldapUserFilter" class="settings-select" type="text" placeholder="(uid={username})">
+              </label>
+              <label class="ldap-field ldap-field-wide">
+                <span>Group Base DN</span>
+                <input id="adm-ldapGroupBaseDn" class="settings-select" type="text" placeholder="cn=groups,cn=accounts,dc=example,dc=test">
+              </label>
+              <label class="ldap-field ldap-field-wide">
+                <span>Group Filter</span>
+                <input id="adm-ldapGroupFilter" class="settings-select" type="text" placeholder="(member={user_dn})">
+              </label>
+              <label class="ldap-field">
+                <span>Allowed Groups</span>
+                <textarea id="adm-ldapAllowedGroups" class="settings-select" rows="3" placeholder="odysseus-users"></textarea>
+              </label>
+              <label class="ldap-field">
+                <span>Admin Groups</span>
+                <textarea id="adm-ldapAdminGroups" class="settings-select" rows="3" placeholder="odysseus-admins"></textarea>
+              </label>
+            </div>
+            <details class="ldap-advanced">
+              <summary>Advanced attributes</summary>
+              <div class="ldap-settings-grid">
+                <label class="ldap-field">
+                  <span>Username Attribute</span>
+                  <input id="adm-ldapUserNameAttribute" class="settings-select" type="text" placeholder="uid">
+                </label>
+                <label class="ldap-field">
+                  <span>Display Name Attribute</span>
+                  <input id="adm-ldapDisplayNameAttribute" class="settings-select" type="text" placeholder="displayName">
+                </label>
+                <label class="ldap-field">
+                  <span>Email Attribute</span>
+                  <input id="adm-ldapEmailAttribute" class="settings-select" type="text" placeholder="mail">
+                </label>
+                <label class="ldap-field">
+                  <span>Connect Timeout</span>
+                  <input id="adm-ldapConnectTimeout" class="settings-select" type="number" min="1" step="0.5" placeholder="5">
+                </label>
+              </div>
+              <div class="ldap-inline-options">
+                <label><input type="checkbox" id="adm-ldapStartTls"> StartTLS</label>
+                <label><input type="checkbox" id="adm-ldapClearBindPassword"> Clear saved bind password</label>
+              </div>
+            </details>
+            <div class="ldap-test-row">
+              <input id="adm-ldapTestUsername" class="settings-select" type="text" placeholder="Test username">
+              <input id="adm-ldapTestPassword" class="settings-select" type="password" placeholder="Test password">
+              <button type="button" class="admin-btn-sm" id="adm-ldapTestBtn">Test Login</button>
+              <button type="button" class="admin-btn-add" id="adm-ldapSaveBtn">Save LDAP</button>
+            </div>
+            <div id="adm-ldapMsg" class="ldap-settings-msg"></div>
+            <pre id="adm-ldapTestResult" class="ldap-test-result hidden"></pre>
+          </div>
           <div class="admin-card">
             <h2><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px;opacity:0.6"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>Users</h2>
             <div id="adm-userList"><div class="admin-empty">Loading...</div></div>
@@ -2118,16 +2242,7 @@
             <div class="adm-add-section">
               <div class="admin-model-form">
                 <div class="admin-model-form-row">
-                  <div class="adm-fused-group" style="display:flex;flex:1 1 180px;min-width:0;">
-                    <select id="adm-epLocalType" style="padding:5px;width:66px;flex-shrink:0;border-top-right-radius:0;border-bottom-right-radius:0;border-right:0;">
-                      <option value="llm" selected>LLM</option>
-                      <option value="image">Image</option>
-                    </select>
-                    <input id="adm-epLocalUrl" type="text" placeholder="Paste endpoint URL, e.g. http://localhost:11434/v1" style="flex:1;min-width:0;border-top-left-radius:0;border-bottom-left-radius:0;">
-                  </div>
-                  <button class="admin-btn-add" id="adm-epLocalAddBtn" style="min-width:55px;text-align:center;display:inline-flex;align-items:center;justify-content:center;gap:4px;flex-shrink:0;">
-                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"/><path d="M5 12h14"/></svg>Add
-                  </button>
+                  <input id="adm-epLocalUrl" type="text" placeholder="Paste endpoint URL, e.g. http://localhost:11434/v1" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" inputmode="url" style="flex:1">
                 </div>
                 <div class="admin-model-form-row" id="adm-epLocalApiKey-row" style="display:none;">
                   <input id="adm-epLocalApiKey" type="password" placeholder="API key (optional — for protected local endpoints)" autocomplete="off" style="flex:1">
@@ -2137,35 +2252,15 @@
             </div>
           </div>
 
-          <!-- ── API card ───────────────────────────────────────────── -->
-          <div class="admin-card">
-            <h2 style="display:flex;align-items:center;gap:8px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px;opacity:0.6"><circle cx="11" cy="12" r="8"/><path d="M19 5v6"/><path d="M16 8h6"/><path d="M7 12h8"/></svg>Add API Models <span style="opacity:0.45;font-weight:normal;font-size:0.82em">(Endpoint)</span>
-              <span style="flex:1"></span>
-              <button class="admin-btn-sm" id="adm-epApiTestBtn" style="font-size:11px;font-weight:normal;display:inline-flex;align-items:center;gap:4px;">
-                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>Test
-              </button>
-              <button class="admin-btn-sm hidden" id="adm-epApiCancelTestBtn" style="font-size:11px;font-weight:normal;">Cancel</button>
-              <div style="position:relative;display:inline-block;">
-                <button class="admin-btn-sm" id="adm-epApiMoreBtn" title="More options" aria-haspopup="true" aria-expanded="false" style="font-size:11px;font-weight:normal;padding:4px 8px;line-height:1;">
-                  <svg width="14" height="4" viewBox="0 0 14 4" fill="currentColor"><circle cx="2" cy="2" r="1.4"/><circle cx="7" cy="2" r="1.4"/><circle cx="12" cy="2" r="1.4"/></svg>
-                </button>
-                <div id="adm-epApiMoreMenu" style="display:none;position:absolute;top:calc(100% + 4px);right:0;z-index:50;min-width:200px;padding:4px;background:var(--panel,var(--bg));border:1px solid var(--border);border-radius:8px;box-shadow:0 6px 20px rgba(0,0,0,0.22);flex-direction:column;gap:1px;">
-                  <div style="font-size:10px;text-transform:uppercase;letter-spacing:0.5px;opacity:0.55;padding:6px 9px 2px;">Connection mode</div>
-                  <button class="admin-btn-sm adm-more-item adm-kind-opt" data-kind="proxy" style="background:none;border:0;border-radius:5px;padding:7px 9px;display:flex;align-items:center;gap:8px;width:100%;text-align:left;font-size:12px;font-weight:normal;color:var(--fg);cursor:pointer;">
-                    <svg class="adm-kind-check" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-                    <span>Proxy</span>
-                    <span style="margin-left:auto;opacity:0.5;font-size:10px;">routed via server</span>
-                  </button>
-                  <button class="admin-btn-sm adm-more-item adm-kind-opt" data-kind="api" style="background:none;border:0;border-radius:5px;padding:7px 9px;display:flex;align-items:center;gap:8px;width:100%;text-align:left;font-size:12px;font-weight:normal;color:var(--fg);cursor:pointer;">
-                    <svg class="adm-kind-check" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="visibility:hidden;"><polyline points="20 6 9 17 4 12"/></svg>
-                    <span>API (direct)</span>
-                    <span style="margin-left:auto;opacity:0.5;font-size:10px;">browser→provider</span>
-                  </button>
-                </div>
-              </div>
-            </h2>
-            <div class="admin-toggle-sub" style="margin:0 0 10px 2px;">Connect a cloud provider (OpenAI, Anthropic, DeepSeek, OpenRouter, etc.).</div>
-            <div class="adm-add-section">
+          <!-- API subsection -->
+          <div class="adm-add-section collapsible collapsed" id="adm-add-api" style="margin-top:14px">
+            <div class="adm-ep-section-head adm-section-toggle" role="button" tabindex="0" aria-expanded="false" aria-controls="adm-add-api-body">
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:4px;"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+              <span>API</span>
+              <svg class="adm-section-caret" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+            </div>
+            <div class="adm-add-section-body" id="adm-add-api-body">
+              <div class="admin-toggle-sub" style="margin:0 0 10px 2px;">Connect a cloud provider (OpenAI, Anthropic, DeepSeek, OpenRouter, etc.).</div>
               <div class="admin-model-form">
                 <div class="admin-model-form-row">
                   <div class="adm-provider-picker adm-provider-combo" id="adm-provider-picker" style="flex:1 1 220px;min-width:0;margin-bottom:0;">
@@ -2184,10 +2279,10 @@
                 <select id="adm-epProvider" style="display:none">
                   <option value="">Custom URL</option>
                   <option value="https://api.anthropic.com" data-logo="anthropic">Anthropic</option>
-                  <option value="https://api.deepseek.com/v1" data-logo="deepseek" selected>DeepSeek</option>
+                  <option value="https://api.deepseek.com" data-logo="deepseek" selected>DeepSeek</option>
                   <option value="https://api.openai.com/v1" data-logo="openai">OpenAI</option>
                   <option value="copilot" data-logo="github" data-auth-flow="copilot">GitHub Copilot</option>
-                  <option value="chatgpt-subscription" data-logo="openai" data-auth-flow="chatgpt-subscription">ChatGPT Subscription</option>
+                  <option value="chatgpt-subscription" data-logo="openai" data-auth-flow="chatgpt-subscription">Codex Subscription</option>
                   <option value="https://openrouter.ai/api/v1" data-logo="openrouter">OpenRouter</option>
                   <option value="https://ollama.com/api" data-logo="ollama">Ollama Cloud</option>
                   <option value="https://api.groq.com/openai/v1" data-logo="groq">Groq</option>
@@ -2226,6 +2321,9 @@
               <span style="flex:1"></span>
               <button class="admin-btn-sm" id="adm-epProbeAllBtn" title="Re-test every endpoint and refresh online status" style="font-size:11px;font-weight:normal;display:inline-flex;align-items:center;gap:4px;">
                 <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>Probe
+              </button>
+              <button class="admin-btn-sm" id="adm-epUnloadAllBtn" title="Unload every currently loaded model from supported local runtimes" style="font-size:11px;font-weight:normal;display:inline-flex;align-items:center;gap:4px;opacity:0.85;">
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v10"/><path d="M18.4 6.6a8 8 0 1 1-12.8 0"/></svg>Unload all
               </button>
               <button class="admin-btn-sm" id="adm-epClearOfflineBtn" title="Remove all endpoints currently marked offline" style="font-size:11px;font-weight:normal;display:inline-flex;align-items:center;gap:4px;opacity:0.85;">
                 <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>Clear offline <span id="adm-epOfflineCount" style="opacity:0.6;margin-left:2px;"></span>
@@ -2273,7 +2371,7 @@
               </div>
               <div class="settings-row">
                 <label class="settings-label">Max steps per message</label>
-                <input id="set-agentMaxRounds" type="text" inputmode="numeric" placeholder="20" class="settings-select" style="width:120px;">
+                <input id="set-agentMaxRounds" type="text" inputmode="numeric" placeholder="0 = unlimited" class="settings-select" style="width:120px;">
               </div>
               <div id="set-agentMsg" style="font-size:11px;color:color-mix(in srgb, var(--fg) 45%, transparent);"></div>
             </div>
@@ -2482,7 +2580,7 @@
 <script type="module" src="/static/js/theme.js"></script>
 <script type="module" src="/static/js/censor.js"></script>
 <script type="module" src="/static/js/settings.js"></script>
-<script type="module" src="/static/js/admin.js"></script>
+<script type="module" src="/static/js/admin.js?v=20260615unload"></script>
 <script type="module" src="/static/js/assistant.js"></script>
 <script type="module" src="/static/app.js?v=20260630mdfontsize"></script>  <!-- app.js must be LAST -->
 <script type="module" src="/static/js/init.js"></script>

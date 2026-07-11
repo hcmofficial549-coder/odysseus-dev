@@ -17,6 +17,7 @@ from src.context_compactor import maybe_compact, trim_for_context
 from src.model_context import estimate_tokens
 from src.auth_helpers import effective_user
 from src.prompt_security import untrusted_context_message
+from src.attachment_refs import attachment_ids_from_messages, attachment_ref
 from routes.prefs_routes import _load_for_user as load_prefs_for_user
 
 from fastapi import HTTPException
@@ -110,7 +111,7 @@ class ChatContext:
     # The chat route emits a doc_update SSE event for each before streaming
     # begins, so the editor pane switches to the new doc immediately.
     auto_opened_docs: list = field(default_factory=list)
-    # Uploads attached to this user turn, resolved and owner-checked for the
+    # Uploads referenced in this chat, resolved and owner-checked for the
     # agent's private context. This is not emitted to the browser.
     uploaded_files: list = field(default_factory=list)
 
@@ -174,6 +175,75 @@ def _enforce_chat_privileges(request, sess) -> None:
         raise HTTPException(429, f"Daily message limit reached ({cap}). Try again in 24 hours.")
 
 
+_GALLERY_CONTEXT_RE = re.compile(
+    r"\b(?:gallery|photos?|pictures?|camera roll|uploaded (?:photo|image)|saved (?:photo|image)|my images?)\b",
+    re.IGNORECASE,
+)
+
+
+def _wants_gallery_context(message: str) -> bool:
+    return bool(_GALLERY_CONTEXT_RE.search(message or ""))
+
+
+def _build_gallery_context_for_chat(owner: Optional[str], limit: int = 8) -> str:
+    """Return a compact Gallery inventory for plain Chat mode.
+
+    Agent mode has manage_gallery/edit_image tools; this is only a small
+    metadata bridge so ordinary Chat mode does not incorrectly claim it has no
+    access when the user asks about saved Gallery photos.
+    """
+    from core.database import GalleryImage
+    from routes.gallery_helpers import _owner_filter
+
+    db = SessionLocal()
+    try:
+        q = db.query(GalleryImage).filter(GalleryImage.is_active == True)
+        q = _owner_filter(q, owner)
+        total = q.count()
+        rows = (
+            q.order_by(GalleryImage.created_at.desc())
+            .limit(max(1, min(25, limit)))
+            .all()
+        )
+        lines = [
+            "The user's Odysseus Gallery metadata is available below.",
+            "Use it to answer questions about saved Gallery photos/images instead of saying you cannot see the Gallery.",
+            "For actual image editing or vision descriptions, Agent mode can use manage_gallery and edit_image tools.",
+        ]
+        if not rows:
+            lines.append("Gallery: no saved images.")
+            return "\n".join(lines)
+        lines.append("Gallery images, newest first:")
+        for img in rows:
+            label = (img.prompt or img.filename or img.id or "Gallery image").strip()
+            bits = [f"id: {img.id}", f"name: {label}", f"url: /api/generated-image/{img.filename}"]
+            if img.width and img.height:
+                bits.append(f"size: {img.width}x{img.height}")
+            if img.model:
+                bits.append(f"model: {img.model}")
+            tags = []
+            for raw in ((img.tags or ""), (img.ai_tags or "")):
+                tags.extend(t.strip() for t in raw.split(",") if t.strip())
+            if tags:
+                seen = set()
+                deduped = []
+                for tag in tags:
+                    key = tag.lower()
+                    if key not in seen:
+                        seen.add(key)
+                        deduped.append(tag)
+                bits.append("tags: " + ", ".join(deduped[:6]))
+            lines.append("- " + "; ".join(bits))
+        if total > len(rows):
+            lines.append(f"... {total - len(rows)} more images not shown.")
+        return "\n".join(lines)
+    except Exception as e:
+        logger.debug("Failed to build Gallery chat context: %s", e)
+        return ""
+    finally:
+        db.close()
+
+
 def needs_auto_name(name: str) -> bool:
     """Check if a session still has its default/placeholder name."""
     if not name:
@@ -186,59 +256,79 @@ def needs_auto_name(name: str) -> bool:
     return False
 
 
+_TITLE_STARTER_RE = re.compile(
+    r"^(?:"
+    r"please\s+|"
+    r"(?:can|could|would)\s+you\s+|"
+    r"help\s+me\s+(?:to\s+)?|"
+    r"i\s+(?:need|want)\s+(?:you\s+)?(?:to\s+)?|"
+    r"tell\s+me\s+(?:about\s+)?"
+    r")",
+    re.IGNORECASE,
+)
+_TITLE_WORD_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_+#./'-]*")
+_TITLE_SMALL_WORDS = {"a", "an", "and", "as", "at", "by", "for", "from", "in", "of", "on", "or", "the", "to", "with"}
+
+
+def _first_user_message_text(sess) -> str:
+    """Return the first user text from a session history."""
+    for msg in getattr(sess, "history", []) or []:
+        if getattr(msg, "role", None) != "user":
+            continue
+        content = getattr(msg, "content", "")
+        if isinstance(content, list):
+            content = next(
+                (
+                    i.get("text", "")
+                    for i in content
+                    if isinstance(i, dict) and i.get("type") == "text"
+                ),
+                "",
+            )
+        return str(content or "")
+    return ""
+
+
+def _title_case_word(word: str, index: int) -> str:
+    if not word:
+        return ""
+    if any(ch.isupper() for ch in word[1:]) or any(ch.isdigit() for ch in word):
+        return word
+    lower = word.lower()
+    if index > 0 and lower in _TITLE_SMALL_WORDS:
+        return lower
+    return lower[:1].upper() + lower[1:]
+
+
+def _derive_session_title_from_text(text: str, *, max_words: int = 6, max_chars: int = 70) -> str:
+    """Create a short local session title without spending an LLM request."""
+    text = str(text or "")
+    text = re.sub(r"```.*?```", " ", text, flags=re.DOTALL)
+    text = re.sub(r"`([^`]+)`", r"\1", text)
+    text = re.sub(r"https?://\S+", " ", text)
+    text = re.sub(r"[\r\n\t]+", " ", text)
+    text = re.sub(r"\s+", " ", text).strip(" \t\r\n\"'`*_#>-:")
+    text = _TITLE_STARTER_RE.sub("", text).strip(" \t\r\n\"'`*_#>-:")
+
+    words = _TITLE_WORD_RE.findall(text)
+    if not words:
+        return ""
+
+    pieces = [_title_case_word(word.strip(".,;:!?()[]{}<>"), i) for i, word in enumerate(words[:max_words])]
+    title = " ".join(piece for piece in pieces if piece).strip()
+    if len(title) > max_chars:
+        title = title[:max_chars].rsplit(" ", 1)[0].strip() or title[:max_chars].strip()
+    return title
+
+
 async def auto_name_session(session_manager, sess):
     """Generate a short title for a session from its first user message."""
     try:
-        from src.llm_core import llm_call_async
-        from src.task_endpoint import resolve_task_endpoint
-
-        # Find first user message
-        first_msg = ""
-        for msg in sess.history:
-            if msg.role == "user":
-                content = msg.content
-                if isinstance(content, list):
-                    content = next(
-                        (i.get("text", "") for i in content if isinstance(i, dict) and i.get("type") == "text"),
-                        "",
-                    )
-                first_msg = str(content)[:500]
-                break
-
+        first_msg = _first_user_message_text(sess)
         if not first_msg:
             return
 
-        owner = getattr(sess, "owner", None)
-        t_url, t_model, t_headers = resolve_task_endpoint(
-            sess.endpoint_url, sess.model, sess.headers, owner=owner
-        )
-        if not t_model:
-            logger.debug("[auto-name] No model provided, skipping")
-            return
-
-        # max_tokens big enough that reasoning models (Minimax M2,
-        # DeepSeek R1, QwQ, etc.) have headroom for <think>…</think>
-        # plus the actual title — 200 used to clip them mid-reasoning
-        # so strip_think left an empty string and no rename happened.
-        # Timeout matches: 60s gives slow local reasoners room to finish.
-        title = await llm_call_async(
-            t_url,
-            t_model,
-            [
-                {"role": "system", "content": "Generate a short title (3-6 words, no quotes) for a conversation that starts with this message. Reply with ONLY the title, nothing else. Do NOT include any thinking, reasoning, or explanation — just the title."},
-                {"role": "user", "content": first_msg},
-            ],
-            temperature=0.3,
-            max_tokens=4096,
-            headers=t_headers,
-            timeout=60,
-        )
-
-        title = title.strip().strip('"\'').strip()
-        # Strip <think>/<thinking> blocks (closed, dangling, or stray tags)
-        # via the central helper.
-        from src.text_helpers import strip_think
-        title = strip_think(title, prose=False, prompt_echo=False)
+        title = _derive_session_title_from_text(first_msg)
         if title and len(title) < 80:
             session_manager.update_session_name(sess.id, title)
             logger.info(f"Auto-named session {sess.id}: {title}")
@@ -375,16 +465,33 @@ async def preprocess(
     )
 
 
-def build_uploaded_file_manifest(att_ids: list, upload_handler, owner: Optional[str]) -> list[dict]:
-    """Resolve current-turn upload IDs into a small tool-facing manifest.
+def build_uploaded_file_manifest(
+    att_ids: list,
+    upload_handler,
+    owner: Optional[str],
+    limit: Optional[int] = None,
+    attempt_limit: Optional[int] = None,
+) -> list[dict]:
+    """Resolve chat upload IDs into a small tool-facing manifest.
 
     The chat UI already sends attachment ids, and preprocessing inlines as much
     text as fits. Agent mode still needs a discoverable bridge for files whose
     content was truncated/omitted or when the model chooses file tools. Only
-    owner-authorized uploads are included, and paths must remain inside the
-    configured upload directory.
+    owner-authorized uploads are included. Host paths are intentionally omitted;
+    agents read through the owner-checked ``read_attachment`` tool instead.
+    ``limit`` counts successfully authorized entries, so stale or cross-owner
+    IDs do not crowd out usable files. ``attempt_limit`` bounds work on corrupt
+    or hostile histories whose candidates can never be resolved.
     """
-    if not att_ids or not upload_handler or not hasattr(upload_handler, "resolve_upload"):
+    if (
+        not att_ids
+        or not upload_handler
+        or not (
+            hasattr(upload_handler, "resolve_uploads")
+            or hasattr(upload_handler, "resolve_upload")
+        )
+        or (limit is not None and limit <= 0)
+    ):
         return []
 
     def _read_file_can_open(path: str) -> bool:
@@ -395,16 +502,49 @@ def build_uploaded_file_manifest(att_ids: list, upload_handler, owner: Optional[
         except Exception:
             return False
 
-    manifest: list[dict] = []
-    for att_id in att_ids:
+    candidate_ids: list[str] = []
+    for attempt, att_id in enumerate(att_ids):
+        if attempt_limit is not None and attempt >= attempt_limit:
+            break
+        candidate_ids.append(str(att_id))
+
+    if hasattr(upload_handler, "resolve_uploads"):
         try:
-            info = upload_handler.resolve_upload(str(att_id), owner=owner)
+            resolved_infos = upload_handler.resolve_uploads(
+                candidate_ids,
+                owner=owner,
+                allow_admin=False,
+                limit=limit,
+            )
         except Exception:
-            logger.debug("Failed to resolve upload %r for agent manifest", att_id, exc_info=True)
-            continue
+            logger.debug("Failed to resolve upload batch for agent manifest", exc_info=True)
+            resolved_infos = []
+    else:
+        resolved_infos = []
+        for att_id in candidate_ids:
+            try:
+                info = upload_handler.resolve_upload(
+                    att_id,
+                    owner=owner,
+                    allow_admin=False,
+                )
+            except Exception:
+                logger.debug(
+                    "Failed to resolve upload %r for agent manifest",
+                    att_id,
+                    exc_info=True,
+                )
+                continue
+            if not isinstance(info, dict):
+                continue
+            resolved_infos.append({**info, "id": info.get("id") or att_id})
+            if limit is not None and len(resolved_infos) >= limit:
+                break
+
+    manifest: list[dict] = []
+    for info in resolved_infos:
         if not isinstance(info, dict):
             continue
-
         path = info.get("path")
         if path:
             try:
@@ -418,13 +558,21 @@ def build_uploaded_file_manifest(att_ids: list, upload_handler, owner: Optional[
             except Exception:
                 path = None
 
-        manifest.append({
-            "id": info.get("id") or str(att_id),
-            "name": info.get("name") or info.get("original_name") or str(att_id),
-            "mime": info.get("mime", ""),
-            "size": info.get("size", 0),
+        ref = attachment_ref(info)
+        if not ref.get("attachment_id"):
+            continue
+        ref["name"] = os.path.basename(str(ref.get("name") or ref["attachment_id"]).replace("\\", "/"))
+        ref.update({
+            "id": ref["attachment_id"],
+            "uri": f"odysseus://attachment/{ref['attachment_id']}",
+            "read_policy": "owner_checked_upload",
+            # Transitional compatibility: existing built-in tools can still use
+            # this path, but only after owner, upload-root, and tool-root checks.
             "path": path,
         })
+        manifest.append(ref)
+        if limit is not None and len(manifest) >= limit:
+            break
     return manifest
 
 
@@ -507,7 +655,7 @@ def resolve_session_auth(sess, session_id: str, owner: Optional[str] = None):
                     logger.warning("Failed to resolve provider auth for session %s: %s", session_id, e)
                     return
                 if not api_key:
-                    # No usable key (e.g. ChatGPT Subscription needs re-auth).
+                    # No usable key (e.g. Codex Subscription needs re-auth).
                     return
                 sess.headers = build_headers(api_key, base)
                 if is_chatgpt_subscription:
@@ -522,8 +670,8 @@ def resolve_session_auth(sess, session_id: str, owner: Optional[str] = None):
                     if stored is not None and _has_auth_keys(stored.headers):
                         stale_q.update({"headers": {}})
                         db.commit()
-                        logger.info(f"Cleared persisted ChatGPT Subscription bearer from session {session_id}")
-                    logger.debug(f"Resolved request-local ChatGPT Subscription auth for session {session_id}")
+                        logger.info(f"Cleared persisted Codex Subscription bearer from session {session_id}")
+                    logger.debug(f"Resolved request-local Codex Subscription auth for session {session_id}")
                     return
                 update_q = db.query(DBSession).filter(DBSession.id == session_id)
                 if owner:
@@ -538,17 +686,33 @@ def resolve_session_auth(sess, session_id: str, owner: Optional[str] = None):
         logger.warning(f"Failed to resolve session headers: {e}")
 
 
+# Date-suffix pattern: model names like "qwen3-vl-plus-2025-12-19" where
+# the endpoint lists the base model "qwen3-vl-plus" without the date.
+_DATE_SUFFIX_RE = re.compile(r'^(.+)-(\d{4}-\d{2}-\d{2})$')
+
+
 def _match_cached_model_id(requested: str, models) -> Optional[str]:
     if not requested or not models:
         return None
     model_ids = [str(m) for m in models if m]
+    # Exact match
     if requested in model_ids:
         return requested
 
     req_base = os.path.basename(requested.rstrip("/"))
+    # Basename match
     for model_id in model_ids:
         if os.path.basename(model_id.rstrip("/")) == req_base:
             return model_id
+
+    # Date-suffixed model name (e.g. "qwen3-vl-plus-2025-12-19" → "qwen3-vl-plus")
+    m = _DATE_SUFFIX_RE.match(requested)
+    if m:
+        base_name = m.group(1)
+        for model_id in model_ids:
+            if model_id == base_name or os.path.basename(model_id.rstrip("/")) == base_name:
+                return model_id
+
     return None
 
 
@@ -675,11 +839,28 @@ async def build_chat_context(
     # bearer-token chat requests use the token owner instead of the "api" sentinel.
     user = effective_user(request)
     uprefs = load_prefs_for_user(user)
-    uploaded_files = build_uploaded_file_manifest(
-        att_ids or [],
-        getattr(chat_handler, "upload_handler", None),
-        getattr(sess, "owner", None),
-    )
+    manifest_ids = [
+        str(att_id).strip()
+        for att_id in (att_ids or [])
+        if att_id is not None and str(att_id).strip()
+    ]
+    if agent_mode:
+        # Persisted metadata contains IDs, never trusted paths. Re-resolve every
+        # historical attachment against the session owner on each agent turn.
+        manifest_ids.extend(attachment_ids_from_messages(getattr(sess, "history", [])))
+    manifest_ids = list(dict.fromkeys(manifest_ids))
+    manifest_upload_handler = getattr(chat_handler, "upload_handler", None)
+    if manifest_ids and manifest_upload_handler:
+        uploaded_files = await asyncio.to_thread(
+            build_uploaded_file_manifest,
+            manifest_ids,
+            manifest_upload_handler,
+            getattr(sess, "owner", None),
+            limit=20 if agent_mode else None,
+            attempt_limit=100 if agent_mode else None,
+        )
+    else:
+        uploaded_files = []
     casual_low_signal = _is_casual_low_signal(message)
 
     # Memory enabled?
@@ -741,6 +922,16 @@ async def build_chat_context(
     # Inject pre-fetched search context (compare mode)
     if search_context and allow_tool_preprocessing and not casual_low_signal:
         preface.append(untrusted_context_message("prefetched search context", search_context))
+
+    if (
+        not agent_mode
+        and not incognito
+        and allow_tool_preprocessing
+        and _wants_gallery_context(preprocessed.text_for_context)
+    ):
+        gallery_context = _build_gallery_context_for_chat(user)
+        if gallery_context:
+            preface.append(untrusted_context_message("gallery context", gallery_context))
 
     # YouTube transcripts
     for transcript in preprocessed.youtube_transcripts:
@@ -1093,8 +1284,8 @@ def _is_session_stream_active(session_id: str) -> bool:
     (issue #2927). Lazily imports the route module's live registry to avoid
     a circular import (chat_routes imports this module at load time)."""
     try:
-        from routes import chat_routes as _cr
-        return session_id in getattr(_cr, "_active_streams", {})
+        from routes.chat import _active_streams
+        return session_id in _active_streams
     except Exception:
         return False
 

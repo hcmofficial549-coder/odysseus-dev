@@ -14,6 +14,7 @@ import fileHandlerModule from './fileHandler.js';
 const API_BASE = window.location.origin;
 let _open = false;
 let _galleryResizeHandler = null;
+let _galleryVisibilityObserver = null;
 
 // Auto-refresh gallery when new image is generated
 window.addEventListener('gallery-refresh', (e) => {
@@ -64,11 +65,111 @@ function _computeFetchLimit() {
 let _searchDebounce = null;
 let _escHandler = null;
 let _albums = [];
+
+function _androidBridge() {
+  try {
+    return window.OdysseusAndroid || null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function _blobToDataUrl(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ''));
+    reader.onerror = () => reject(reader.error || new Error('read failed'));
+    reader.readAsDataURL(blob);
+  });
+}
+
+function _downloadViaAnchor(blobOrUrl, filename) {
+  const a = document.createElement('a');
+  let objUrl = '';
+  if (blobOrUrl instanceof Blob) {
+    objUrl = URL.createObjectURL(blobOrUrl);
+    a.href = objUrl;
+  } else {
+    a.href = blobOrUrl;
+  }
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  if (objUrl) setTimeout(() => URL.revokeObjectURL(objUrl), 2000);
+}
+
+async function _downloadBlob(blob, filename) {
+  const bridge = _androidBridge();
+  if (bridge && typeof bridge.saveDownload === 'function') {
+    const dataUrl = await _blobToDataUrl(blob);
+    bridge.saveDownload(dataUrl, filename, blob.type || 'application/octet-stream');
+    return;
+  }
+  _downloadViaAnchor(blob, filename);
+}
+
+async function _downloadUrl(url, filename) {
+  const res = await fetch(url, { credentials: 'same-origin' });
+  if (!res.ok) throw new Error(`download failed: HTTP ${res.status}`);
+  const blob = await res.blob();
+  await _downloadBlob(blob, filename);
+}
 // Albums tab — search filter + multi-select state. Mirrors what the
 // Photos tab does (_search, _selectMode) but scoped to the albums grid.
 let _albumSearch = '';
 let _albumSelectMode = false;
 const _albumSelected = new Set();
+
+function _setGalleryShellActive(active) {
+  document.body.classList.toggle('gallery-open', active);
+  document.getElementById('tool-gallery-btn')?.classList.toggle('active', active);
+  document.getElementById('rail-gallery')?.classList.toggle('active', active);
+}
+
+function _syncGalleryVisibility() {
+  const modal = document.getElementById('gallery-modal');
+  const visible = !!modal
+    && !modal.classList.contains('hidden')
+    && !modal.classList.contains('modal-minimized');
+  _setGalleryShellActive(visible);
+
+  const selecting = visible
+    && !!document.getElementById('gallery-select-btn')?.classList.contains('active');
+  document.body.classList.toggle('gallery-selecting', selecting);
+  if (!visible) document.querySelectorAll('.gallery-bulk-menu').forEach(m => m.remove());
+}
+
+function _wireGalleryVisibilityObserver(modal) {
+  if (_galleryVisibilityObserver) _galleryVisibilityObserver.disconnect();
+  if (!modal) return;
+  _galleryVisibilityObserver = new MutationObserver(_syncGalleryVisibility);
+  _galleryVisibilityObserver.observe(modal, {
+    attributes: true,
+    attributeFilter: ['class', 'style'],
+  });
+  _syncGalleryVisibility();
+}
+
+function _clearGalleryVisibilityObserver() {
+  if (_galleryVisibilityObserver) {
+    _galleryVisibilityObserver.disconnect();
+    _galleryVisibilityObserver = null;
+  }
+}
+
+function _settleGalleryMobileSheet(modal) {
+  if (!modal || !(window.innerWidth <= 768 || 'ontouchstart' in window)) return;
+  const content = modal.querySelector('.gallery-modal-content');
+  if (!content) return;
+  setTimeout(() => {
+    if (content.isConnected
+        && !content.classList.contains('modal-closing')
+        && !modal.classList.contains('hidden')) {
+      content.classList.add('sheet-ready');
+    }
+  }, 260);
+}
 
 // ---- API helpers ----
 
@@ -1275,23 +1376,9 @@ function _renderGrid() {
       const url = btn.dataset.url;
       const filename = btn.dataset.filename || `image-${btn.dataset.id}.png`;
       try {
-        const res = await fetch(url, { credentials: 'same-origin' });
-        const blob = await res.blob();
-        const objUrl = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = objUrl;
-        a.download = filename;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        setTimeout(() => URL.revokeObjectURL(objUrl), 1000);
+        await _downloadUrl(url, filename);
       } catch (_) {
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = filename;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
+        _downloadViaAnchor(url, filename);
       }
     });
   });
@@ -1629,25 +1716,11 @@ function _openDetail(img) {
   });
 
   document.getElementById('gallery-download-btn').addEventListener('click', async () => {
+    const filename = img.filename || `image-${img.id}.png`;
     try {
-      const res = await fetch(img.url, { credentials: 'same-origin' });
-      const blob = await res.blob();
-      const objUrl = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = objUrl;
-      a.download = img.filename || `image-${img.id}.png`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      setTimeout(() => URL.revokeObjectURL(objUrl), 1000);
+      await _downloadUrl(img.url, filename);
     } catch (e) {
-      // Fallback: direct link
-      const a = document.createElement('a');
-      a.href = img.url;
-      a.download = img.filename || `image-${img.id}.png`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
+      _downloadViaAnchor(img.url, filename);
     }
   });
 
@@ -2068,8 +2141,16 @@ export function openGallery() {
     railBtnId: 'rail-gallery',
     sidebarBtnId: 'tool-gallery-btn',
     closeFn: () => _doCloseGallery(),
-    restoreFn: () => {},
+    restoreFn: () => {
+      _open = true;
+      _syncGalleryVisibility();
+      _settleGalleryMobileSheet(modal);
+      requestAnimationFrame(() => window.dispatchEvent(new Event('resize')));
+    },
   });
+  try { Modals.injectMinimizeButton(modal, 'gallery-modal'); } catch (_) {}
+  _wireGalleryVisibilityObserver(modal);
+  _settleGalleryMobileSheet(modal);
 
   // Allow dragging the modal by its header — same pattern as Email Library,
   // Sessions, etc. The tileManager (corner/edge snap-tiling) listens on
@@ -2670,14 +2751,7 @@ export function openGallery() {
         });
         if (!res.ok) throw new Error('zip failed');
         const blob = await res.blob();
-        const objUrl = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = objUrl;
-        a.download = 'gallery-photos.zip';
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        setTimeout(() => URL.revokeObjectURL(objUrl), 2000);
+        await _downloadBlob(blob, 'gallery-photos.zip');
         _exitSelectMode();
         if (uiModule) uiModule.showToast(`Downloaded ${ids.length} photos (zip)`);
       } catch (e) {
@@ -2691,16 +2765,7 @@ export function openGallery() {
       const it = _items.find(i => i.id === id);
       if (!it) continue;
       try {
-        const res = await fetch(it.url, { credentials: 'same-origin' });
-        const blob = await res.blob();
-        const objUrl = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = objUrl;
-        a.download = it.filename || `image-${it.id}.png`;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        setTimeout(() => URL.revokeObjectURL(objUrl), 1000);
+        await _downloadUrl(it.url, it.filename || `image-${it.id}.png`);
         n++;
         // Stagger so the browser doesn't drop simultaneous downloads.
         await new Promise(r => setTimeout(r, 250));
@@ -2795,8 +2860,7 @@ export function openGallery() {
   // we get a chance to close just the photo detail.
   document.addEventListener('keydown', _escHandler, true);
 
-  const btn = document.getElementById('tool-gallery-btn');
-  if (btn) btn.classList.add('active');
+  _syncGalleryVisibility();
 
   // 1) Paint cached state immediately so the user sees photos instantly.
   //    Filters, sort, search box, album chips, and the grid all come from
@@ -2879,12 +2943,25 @@ export async function openGalleryImage(imageId) {
 }
 
 function _doCloseGallery() {
+  // If the gallery modal doesn't exist in the DOM, any editor state is
+  // stale/orphaned. Clean up forcefully instead of blocking the user.
+  const modalEl = document.getElementById('gallery-modal');
+  if (!modalEl) {
+    _open = false;
+    closeEditor();
+    window.__galleryAllowCloseEditor = false;
+    window.__galleryEditLive = false;
+    return;
+  }
+
   const editorMounted = !!document.querySelector('#gallery-editor-container .gallery-editor');
   if ((window.__galleryEditLive || isEditorOpen() || editorMounted) && !window.__galleryAllowCloseEditor) {
     if (uiModule) uiModule.showToast('Close the edit tab first');
     return;
   }
   _open = false;
+  _clearGalleryVisibilityObserver();
+  document.body.classList.remove('gallery-selecting');
   clearTimeout(_searchDebounce);
   if (_galleryResizeHandler) {
     window.removeEventListener('resize', _galleryResizeHandler);
@@ -2912,8 +2989,7 @@ function _doCloseGallery() {
     _escHandler = null;
   }
 
-  const btn = document.getElementById('tool-gallery-btn');
-  if (btn) btn.classList.remove('active');
+  _setGalleryShellActive(false);
 }
 
 export function closeGallery() {
