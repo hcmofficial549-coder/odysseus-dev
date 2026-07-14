@@ -41,6 +41,8 @@ class TTSService:
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self._kokoro = None  # lazy-init
+        self._piper = None  # lazy-init
+        self._silero = None  # lazy-init
 
     # ── Settings ──
 
@@ -68,6 +70,12 @@ class TTSService:
         if provider == "local":
             kokoro = self._get_kokoro()
             return kokoro is not None and kokoro.available
+        if provider == "piper":
+            piper = self._get_piper()
+            return piper is not None and piper.available
+        if provider == "silero":
+            silero = self._get_silero()
+            return silero is not None and silero.available
         if isinstance(provider, str) and provider.startswith("endpoint:"):
             return True  # assume reachable; errors surface at synthesis time
         return False
@@ -102,6 +110,20 @@ class TTSService:
         if self._kokoro is None:
             self._kokoro = _KokoroPipeline()
         return self._kokoro
+
+    # ── Piper (local) ──
+
+    def _get_piper(self):
+        if self._piper is None:
+            self._piper = _PiperPipeline()
+        return self._piper
+
+    # ── Silero (local) ──
+
+    def _get_silero(self):
+        if self._silero is None:
+            self._silero = _SileroPipeline()
+        return self._silero
 
     # ── API endpoint ──
 
@@ -174,6 +196,20 @@ class TTSService:
             else:
                 logger.warning("Kokoro TTS not available")
                 return None
+        elif provider == "piper":
+            piper = self._get_piper()
+            if piper and piper.available:
+                audio_data = piper.synthesize_raw(text, voice, speed)
+            else:
+                logger.warning("Piper TTS not available")
+                return None
+        elif provider == "silero":
+            silero = self._get_silero()
+            if silero and silero.available:
+                audio_data = silero.synthesize_raw(text, voice, speed)
+            else:
+                logger.warning("Silero TTS not available")
+                return None
         elif provider.startswith("endpoint:"):
             endpoint_id = provider.split(":", 1)[1]
             audio_data = self._synthesize_api(text, endpoint_id, model, voice, speed)
@@ -219,7 +255,25 @@ class TTSService:
 
         if provider == "local":
             kokoro = self._get_kokoro()
-            stats["model"] = "Kokoro-82M (GPU)" if (kokoro and kokoro.available) else "Kokoro (not loaded)"
+            if kokoro and kokoro.available:
+                stats["model"] = f"Kokoro-82M ({kokoro._device_label})"
+            else:
+                stats["model"] = "Kokoro (not loaded)"
+        elif provider == "piper":
+            piper = self._get_piper()
+            if piper and piper.available:
+                stats["model"] = f"Piper ({piper._device_label})"
+                stats["voice"] = piper._voice_name or "en_US-lessac-medium"
+            else:
+                stats["model"] = "Piper (not loaded)"
+        elif provider == "silero":
+            silero = self._get_silero()
+            if silero and silero.available:
+                stats["model"] = f"Silero v5 ({silero._device_label})"
+                stats["voice"] = silero._voice or "kseniya"
+                stats["speakers"] = silero.model.speakers if silero.model else []
+            else:
+                stats["model"] = "Silero (not loaded)"
         elif provider == "browser":
             stats["model"] = "Browser (Web Speech API)"
         elif provider.startswith("endpoint:"):
@@ -242,17 +296,21 @@ class _KokoroPipeline:
             import torch
             from kokoro import KPipeline
 
-            if not torch.cuda.is_available():
-                logger.warning("CUDA not available for Kokoro TTS")
-                return
-
-            self.device = torch.device("cuda:0")
-            with torch.cuda.device(0):
+            if torch.cuda.is_available():
+                self.device = torch.device("cuda:0")
+                with torch.cuda.device(0):
+                    self.pipeline = KPipeline(lang_code="a")
+                    if hasattr(self.pipeline, "model"):
+                        self.pipeline.model = self.pipeline.model.to(self.device)
+                self._device_label = "GPU"
+                logger.info("Kokoro-82M TTS pipeline loaded on GPU")
+            else:
+                self.device = torch.device("cpu")
                 self.pipeline = KPipeline(lang_code="a")
-                if hasattr(self.pipeline, "model"):
-                    self.pipeline.model = self.pipeline.model.to(self.device)
+                self._device_label = "CPU"
+                logger.warning("Kokoro-82M TTS loaded on CPU — synthesis will be slower (~2-5s/sentence)")
+
             self.available = True
-            logger.info("Kokoro-82M TTS pipeline loaded")
         except ImportError as e:
             logger.warning(f"Kokoro TTS not available: {e}")
             logger.warning("Install with: pip install kokoro soundfile")
@@ -263,13 +321,11 @@ class _KokoroPipeline:
         if not self.available:
             return None
         try:
-            import torch
             import numpy as np
 
-            with torch.cuda.device(self.device):
-                chunks = []
-                for _, _, audio in self.pipeline(text, voice=voice):
-                    chunks.append(audio)
+            chunks = []
+            for _, _, audio in self.pipeline(text, voice=voice):
+                chunks.append(audio)
 
             if not chunks:
                 return None
@@ -284,6 +340,139 @@ class _KokoroPipeline:
             return buf.getvalue()
         except Exception as e:
             logger.error(f"Kokoro synthesis failed: {e}", exc_info=True)
+            return None
+
+
+class _PiperPipeline:
+    """Encapsulates Piper TTS — fast local TTS using ONNX models.
+
+    Supports many languages out of the box (Russian, English, etc.).
+    Voice models are .onnx files downloaded from HuggingFace.
+    """
+
+    MODELS_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "piper_voices"
+
+    def __init__(self):
+        self.voice = None
+        self.available = False
+        self._voice_name = None
+        self._device_label = "CPU"
+        self._init()
+
+    def _init(self):
+        try:
+            from piper import PiperVoice
+
+            self.MODELS_DIR.mkdir(parents=True, exist_ok=True)
+
+            # Find first .onnx model in the voices directory
+            models = sorted(self.MODELS_DIR.glob("*.onnx"))
+            if not models:
+                logger.warning("Piper TTS: no voice models found in %s", self.MODELS_DIR)
+                logger.warning("Download with: python3 -m piper.download_voices --output_dir %s ru_RU-irina-medium en_US-lessac-medium", self.MODELS_DIR)
+                return
+
+            model_path = models[0]
+            self._voice_name = model_path.stem
+            self.voice = PiperVoice.load(str(model_path))
+            self.available = True
+            logger.info(f"Piper TTS loaded: {self._voice_name}")
+        except ImportError as e:
+            logger.warning(f"Piper TTS not available: {e}")
+            logger.warning("Install with: pip install piper-tts")
+        except Exception as e:
+            logger.error(f"Piper init failed: {e}", exc_info=True)
+
+    def synthesize_raw(self, text: str, voice: str = "", speed: float = 1.0) -> Optional[bytes]:
+        if not self.available:
+            return None
+        try:
+            import wave as wave_mod
+
+            # If a specific voice model is requested and different from loaded, try to load it
+            if voice and voice != self._voice_name:
+                model_path = self.MODELS_DIR / f"{voice}.onnx"
+                if model_path.exists():
+                    from piper import PiperVoice
+                    self.voice = PiperVoice.load(str(model_path))
+                    self._voice_name = voice
+                else:
+                    logger.warning(f"Piper voice '{voice}' not found, using {self._voice_name}")
+
+            buf = io.BytesIO()
+            with wave_mod.open(buf, "wb") as wf:
+                self.voice.synthesize_wav(text, wf)
+            return buf.getvalue()
+        except Exception as e:
+            logger.error(f"Piper synthesis failed: {e}", exc_info=True)
+            return None
+
+
+class _SileroPipeline:
+    """Encapsulates Silero TTS — high-quality local TTS using PyTorch models.
+
+    Supports Russian and English with multiple speakers.
+    Models are loaded via torch.hub from snakers4/silero-models.
+    """
+
+    MODELS_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "silero_models"
+
+    def __init__(self):
+        self.model = None
+        self.available = False
+        self._device_label = "CPU"
+        self._voice = "kseniya"
+        self._sample_rate = 48000
+        self._init()
+
+    def _init(self):
+        try:
+            import torch
+            import os
+
+            os.environ.setdefault("TORCH_HOME", "/app/data/torch_cache")
+
+            self.model, _ = torch.hub.load(
+                repo_or_dir='snakers4/silero-models',
+                model='silero_tts',
+                language='ru',
+                speaker='v5_ru',
+                trust_repo=True,
+            )
+            self._voice = "kseniya"
+            self._device_label = "CPU"
+            self.available = True
+            logger.info(f"Silero TTS loaded (v5_ru, speakers: {self.model.speakers})")
+        except ImportError as e:
+            logger.warning(f"Silero TTS not available: {e}")
+            logger.warning("Install with: pip install torch scipy")
+        except Exception as e:
+            logger.error(f"Silero init failed: {e}", exc_info=True)
+
+    def synthesize_raw(self, text: str, voice: str = "", speed: float = 1.0) -> Optional[bytes]:
+        if not self.available:
+            return None
+        try:
+            import torch
+            import numpy as np
+
+            speaker = voice if voice and voice in self.model.speakers else self._voice
+
+            audio = self.model.apply_tts(
+                text=text,
+                speaker=speaker,
+                sample_rate=self._sample_rate,
+            )
+
+            buf = io.BytesIO()
+            with wave.open(buf, "wb") as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)
+                wf.setframerate(self._sample_rate)
+                wf.writeframes((audio.numpy() * 32767).astype(np.int16).tobytes())
+            return buf.getvalue()
+        except Exception as e:
+            logger.error(f"Silero synthesis failed: {e}", exc_info=True)
             return None
 
 

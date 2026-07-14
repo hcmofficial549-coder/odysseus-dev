@@ -1215,6 +1215,78 @@ FUNCTION_TOOL_SCHEMAS = [
             }
         }
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "manage_bookstack",
+            "description": "Search, read, create, update, and delete pages in BookStack wiki. Use 'search' to find content, 'get_page' to read a page, 'create_page' to add new content. BookStack must be configured in Settings with URL and API token.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string",
+                               "enum": ["search", "list_shelves", "list_books", "get_book", "list_pages", "get_page", "create_page", "update_page", "delete_page", "export_page"],
+                               "description": "Action to perform"},
+                    "query": {"type": "string", "description": "Search query (for search action)"},
+                    "book_id": {"type": "integer", "description": "Book ID (for list_pages, create_page)"},
+                    "chapter_id": {"type": "integer", "description": "Chapter ID (for list_pages, create_page)"},
+                    "page_id": {"type": "integer", "description": "Page ID (for get_page, update_page, delete_page, export_page)"},
+                    "id": {"type": "integer", "description": "Alias for page_id or book_id depending on action"},
+                    "name": {"type": "string", "description": "Page name (for create_page, update_page)"},
+                    "content": {"type": "string", "description": "Page content as HTML or markdown (for create_page, update_page)"},
+                    "html": {"type": "string", "description": "Page content as HTML (for create_page, update_page)"},
+                    "markdown": {"type": "string", "description": "Page content as markdown (for create_page, update_page)"},
+                    "tags": {"type": "array", "items": {"type": "string"}, "description": "Tags to apply (for create_page, update_page)"},
+                    "count": {"type": "integer", "description": "Number of results for search (default 20)"},
+                    "shelf_id": {"type": "integer", "description": "Shelf ID to filter books"},
+                },
+                "required": ["action"]
+            }
+        }
+    },
+    # Subagent/actor tools
+    {
+        "type": "function",
+        "function": {
+            "name": "spawn_subagent",
+            "description": "Spawn a child agent to perform a task independently. Returns an actor_id for tracking.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task": {"type": "string", "description": "The task for the subagent to perform"},
+                    "agent_type": {"type": "string", "description": "Agent type: explore (read-only), general, build (full access), plan (no writes)", "default": "general"},
+                    "background": {"type": "boolean", "description": "Run in background (fire-and-forget)", "default": False},
+                    "tool_allowlist": {"type": "array", "items": {"type": "string"}, "description": "Optional list of allowed tools for the subagent"},
+                },
+                "required": ["task"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "wait_actor",
+            "description": "Wait for a spawned actor/subagent to complete and return its result.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "actor_id": {"type": "string", "description": "The actor ID to wait for"},
+                    "timeout": {"type": "number", "description": "Timeout in seconds (default 600)", "default": 600},
+                },
+                "required": ["actor_id"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_actors",
+            "description": "List all active actors/subagents and their status.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+            }
+        }
+    },
 ]
 
 
@@ -1507,6 +1579,8 @@ def function_call_to_tool_block(name: str, arguments: str) -> Optional[ToolBlock
         # them once; pre-escaping here caused literal ``\u00f1`` sequences to
         # remain visible in the debug panel.
         content = json.dumps(args, ensure_ascii=False)
+    elif tool_type in ("spawn_subagent", "wait_actor", "list_actors"):
+        content = json.dumps(args)
     else:
         content = json.dumps(args)
 

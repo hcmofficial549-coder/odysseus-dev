@@ -6,6 +6,7 @@ Wraps stream_llm() with multi-round tool execution.
 The LLM decides when to use tools by writing fenced code blocks.
 """
 
+from __future__ import annotations
 import asyncio
 import collections
 import json
@@ -39,6 +40,9 @@ from src.agent_tools import (
     ToolBlock,
     MAX_AGENT_ROUNDS,
 )
+
+from src.agent.loop_detector import LoopDetector, RecoveryLevel, StableSignature
+from src.agent.recovery import IntentSupervisor, RecoveryPrompts
 
 logger = logging.getLogger(__name__)
 
@@ -615,51 +619,94 @@ def _compact_tool_line(name: str, section: str) -> str:
 
 
 def _assemble_prompt(tool_names: set, disabled_tools: set = None, compact: bool = False) -> str:
-    """Build the system prompt with only the specified tools included."""
+    """Build the system prompt with only the specified tools included.
+    
+    Uses PromptBuilder for modular prompt assembly.
+    """
+    from src.agent.prompt_builder import PromptBuilder, PromptSection
+    
     disabled = disabled_tools or set()
     included = tool_names - disabled
-
+    
+    builder = PromptBuilder()
+    builder.set_compact(compact)
+    builder.disable_tools(disabled)
+    
     if compact:
+        # Compact mode: one-liner tool list for API models
         tool_lines = []
         for name, _default_section in TOOL_SECTIONS.items():
             if name in included:
                 tool_lines.append(f"- `{name}`")
-        parts = [
-            "You are an AI assistant with native tool/function calling. "
-            "Only the tool schemas provided by the API are available for this turn. "
-            "Use native tool calls when action is needed; do not write tool syntax or tool instructions in chat.",
-            "## Available tools\n" + ("\n".join(tool_lines) if tool_lines else "none"),
-            _API_AGENT_RULES,
-        ]
-        parts.extend(_domain_rules_for_tools(included))
-        return "\n\n".join(parts)
-
-    parts = [_AGENT_PREAMBLE]
-
-    # Collect full-block tool sections (with examples)
-    full_blocks = []
-    # Collect one-liner tool sections
-    one_liners = []
-
-    for name, _default_section in TOOL_SECTIONS.items():
-        if name not in included:
-            continue
-        section = _section_text(name, _default_section)
-        if section.startswith("```") or section.startswith("-"):
-            if section.startswith("- "):
-                one_liners.append(section)
-            else:
-                full_blocks.append(section)
-
-    if full_blocks:
-        parts.append("\n\n".join(full_blocks))
-
-    if one_liners:
-        parts.append("## Additional tools\n" + "\n".join(one_liners))
-
-    parts.append(_AGENT_RULES)
-    parts.extend(_domain_rules_for_tools(included))
-    return "\n\n".join(parts)
+        builder.add_section(PromptSection(
+            id="preamble",
+            content="You are an AI assistant with native tool/function calling. "
+                    "Only the tool schemas provided by the API are available for this turn. "
+                    "Use native tool calls when action is needed; do not write tool syntax or tool instructions in chat.",
+            priority=100,
+            trusted=True,
+        ))
+        builder.add_section(PromptSection(
+            id="tools",
+            content="## Available tools\n" + ("\n".join(tool_lines) if tool_lines else "none"),
+            priority=90,
+            trusted=True,
+        ))
+        builder.add_section(PromptSection(
+            id="rules",
+            content=_API_AGENT_RULES,
+            priority=80,
+            trusted=True,
+        ))
+    else:
+        # Full mode: preamble + tool sections + rules
+        builder.add_section(PromptSection(
+            id="preamble",
+            content=_AGENT_PREAMBLE,
+            priority=100,
+            trusted=True,
+        ))
+        
+        # Add tool sections
+        full_blocks = []
+        one_liners = []
+        for name, _default_section in TOOL_SECTIONS.items():
+            if name not in included:
+                continue
+            section = _section_text(name, _default_section)
+            if section.startswith("```") or section.startswith("-"):
+                if section.startswith("- "):
+                    one_liners.append(section)
+                else:
+                    full_blocks.append(section)
+        
+        if full_blocks:
+            builder.add_section(PromptSection(
+                id="tool_sections",
+                content="\n\n".join(full_blocks),
+                priority=90,
+                trusted=True,
+            ))
+        if one_liners:
+            builder.add_section(PromptSection(
+                id="additional_tools",
+                content="## Additional tools\n" + "\n".join(one_liners),
+                priority=85,
+                trusted=True,
+            ))
+        
+        builder.add_section(PromptSection(
+            id="rules",
+            content=_AGENT_RULES,
+            priority=80,
+            trusted=True,
+        ))
+    
+    # Add domain rules
+    for domain_rule in _domain_rules_for_tools(included):
+        builder.add_domain_rule(domain_rule[:20], domain_rule)
+    
+    return builder.build()
 
 
 # Legacy: full prompt with all tools (fallback when RAG unavailable)
@@ -875,8 +922,6 @@ def _strip_think_blocks(text: str) -> str:
         parts.append(text[pos:start])
         pos = end + 8  # len("</think>")
     return "".join(parts)
-
-
 _LOW_SIGNAL_RE = re.compile(r"^[\W_]*$", re.UNICODE)
 _CASUAL_OPENING_RE = re.compile(
     r"^\s*(?:h+i+|hey+|hello+|yo+|sup+|what'?s up|wass?up|hiya|howdy|"
@@ -2444,7 +2489,7 @@ async def _run_verifier_subagent(
     except Exception as e:
         logger.warning(f"[agent] verifier subagent failed: {e}")
         return []
-    raw = _strip_think_blocks(raw or "")
+    raw = re.sub(r"<think>.*?</think>", "", raw or "", flags=re.DOTALL | re.IGNORECASE)
     last_v = None
     for line in raw.splitlines():
         if "VERIFICATION:" in line:
@@ -3071,6 +3116,10 @@ async def stream_agent_loop(
     else:
         _is_api_model = any(h in endpoint_url for h in _API_HOSTS) or _model_supports_tools
     _compact_agent_prompt = _is_api_model or _is_ollama_native or _ollama_openai_compat
+    
+    # Auto-detect native function calling support based on first round response
+    # If the model returns tool calls in text (not native function calls), it doesn't support native function calling
+    _auto_detected_native = None  # None = unknown, True = supports, False = doesn't support
     messages, mcp_schemas = _build_system_prompt(
         messages, model, _prompt_active_document, mcp_mgr, disabled_tools,
         needs_admin=_needs_admin, relevant_tools=_relevant_tools,
@@ -3192,6 +3241,60 @@ async def stream_agent_loop(
         logger.warning("[agent] Soft context trim skipped: %s", e)
     prep_timings["context_trim"] = time.time() - _t3
 
+    # ── Checkpoint trigger ──────────────────────────────────────────────
+    # When context is still large after soft trim (>80% of window), persist
+    # state to checkpoint files and do a harder trim. This prevents the
+    # agent from losing context in long sessions.
+    _t_cp = time.time()
+    try:
+        _cp_tokens = estimate_tokens(messages)
+        _cp_threshold = (context_length or 8192) * 0.8
+        if _cp_tokens > _cp_threshold and session_id:
+            import os
+            _data_dir = os.environ.get("APP_DATA_DIR", "/app/data")
+            _cp_base = os.path.join(_data_dir, "memory", session_id)
+            from src.agent.checkpoint_writer import CheckpointWriter
+            _cp_writer = CheckpointWriter(_cp_base)
+
+            # Extract key state from recent messages for checkpoint
+            _recent_user = ""
+            for msg in reversed(messages):
+                if msg.get("role") == "user":
+                    _content = msg.get("content", "")
+                    if isinstance(_content, list):
+                        _content = " ".join(b.get("text", "") for b in _content if isinstance(b, dict))
+                    _recent_user = (_content or "").strip()[:500]
+                    break
+
+            _cp_writer.write_checkpoint(
+                active_intent=_recent_user or "Agent conversation in progress",
+                next_action="Continue from last user message",
+                current_work=f"Context at {_cp_tokens} tokens ({round(_cp_tokens/max(context_length,1)*100)}% of {context_length})",
+            )
+
+            # Hard trim: keep system messages + last 4 non-system messages
+            _sys_msgs = [m for m in messages if m.get("role") == "system"]
+            _non_sys = [m for m in messages if m.get("role") != "system"]
+            if len(_non_sys) > 4:
+                _rebuild_msg = {
+                    "role": "system",
+                    "content": (
+                        "## Context checkpoint\n"
+                        "Your previous context was compacted. A checkpoint was saved to disk. "
+                        "Here is the restored state:\n\n"
+                        + _cp_writer.rebuild_context()
+                    ),
+                }
+                messages = _sys_msgs + [_rebuild_msg] + _non_sys[-4:]
+                _after_cp_tokens = estimate_tokens(messages)
+                logger.info(
+                    "[agent] Checkpoint triggered: %s -> %s tokens (threshold=%s, context_length=%s)",
+                    _cp_tokens, _after_cp_tokens, int(_cp_threshold), context_length,
+                )
+    except Exception as e:
+        logger.debug("[agent] Checkpoint trigger skipped: %s", e)
+    prep_timings["checkpoint"] = time.time() - _t_cp
+
     # Strip internal metadata keys before sending to the LLM API
     messages = [{k: v for k, v in msg.items() if k != "_protected"} for msg in messages]
 
@@ -3232,36 +3335,15 @@ async def stream_agent_loop(
     # stuck firing the same tool call over and over with no text — burns
     # all 20 rounds, looks like the chat "died". Track recent call
     # signatures + consecutive no-text tool rounds to bail early.
-    _recent_call_sigs = collections.deque(maxlen=6)
-    _stuck_rounds = 0
-    # Frequency of each exact call signature (tool + args), for the runaway
-    # backstop. Counting identical repeats — not distinct same-tool calls —
-    # lets a legit batch (e.g. 18 calendar events at once) through.
-    _call_freq: collections.Counter = collections.Counter()
-    _force_answer = False  # set by loop-breaker → next round runs with NO tools
-    # Supervisor: how many times we've nudged the model after it announced
-    # an action without emitting the tool call. Capped to prevent a model
-    # that *can't* call the tool from looping forever.
-    _intent_nudge_count = 0
-    _MAX_INTENT_NUDGES = 2
-
-    # "I said I would, then didn't" detector. The pattern that breaks debug
-    # loops on weak models (deepseek-v4-flash mid-2026): the model writes
-    # "Let me tail the output to see the error" and then ends the turn with
-    # no tool_calls. The intent is sincere but the function call gets dropped.
-    # Match the common phrasings + an action verb that maps to an available
-    # tool, so we don't nudge on harmless transitional text like "let me
-    # know what you think".
-    _INTENT_RE = re.compile(
-        r"(?:^|\n)\s*(?:let me|i'?ll|i will|i need to|we need to|need to|"
-        r"i should|we should|i must|we must|going to|let's)\s+"
-        r"(?:tail|check|investigate|look at|see|tail|read|fetch|inspect|"
-        r"verify|diagnose|examine|debug|capture|grab|pull|view|run|call|"
-        r"trigger|launch|start|kick off|stop|kill|restart|adopt|serve|"
-        r"register|adopt|list|search|find|query|hit|ping|test|use|perform|do)"
-        r"\b[^.\n]{0,140}",
-        re.IGNORECASE,
+    # Loop detection — delegated to src.agent modules
+    _loop_detector = LoopDetector(
+        max_rounds=max_rounds,
+        stall_threshold=4,
+        runaway_threshold=15,
     )
+    _intent_supervisor = IntentSupervisor(max_nudges=2)
+    _force_answer = False  # kept for backward compat with other code paths
+    _THINK_RE = re.compile(r'<think>.*?</think>', re.DOTALL | re.IGNORECASE)
     _awaiting_user = False  # set by ask_user → end the turn and wait for a choice
 
     # Document streaming state (persists across rounds)
@@ -3600,6 +3682,18 @@ async def stream_agent_loop(
             is_api_model=(_is_api_model and not guide_only),
             allow_fenced_for_api=_ody_doc_finetune_mode,
         )
+        
+        # Auto-detect native function calling support based on first round response
+        # If we haven't detected yet and the model returned tool blocks from fenced code
+        # (not native function calls), it likely doesn't support native function calling
+        if _auto_detected_native is None and round_num == 1:
+            if tool_blocks and not used_native:
+                _auto_detected_native = False
+                logger.info(f"[agent] Auto-detected: model does NOT support native function calling (fenced blocks used)")
+            elif native_tool_calls:
+                _auto_detected_native = True
+                logger.info(f"[agent] Auto-detected: model supports native function calling")
+        
         if _ody_doc_stream_create_mode and tool_blocks:
             create_idx = next(
                 (idx for idx, block in enumerate(tool_blocks) if block.tool_type == "create_document"),
@@ -3686,7 +3780,7 @@ async def stream_agent_loop(
             if tool_blocks:
                 logger.info(f"[agent] force-answer round {round_num}: discarding {len(tool_blocks)} ignored tool call(s)")
             tool_blocks = []
-            if not _strip_think_blocks(strip_tool_blocks(round_response)).strip():
+            if not _THINK_RE.sub("", strip_tool_blocks(round_response)).strip():
                 # The model burned its budget gathering data but never wrote a
                 # final answer (common with weaker models on multi-source
                 # briefings). Salvage it: one blunt non-streaming synthesis call
@@ -3709,7 +3803,7 @@ async def stream_agent_loop(
                         url=endpoint_url, model=model, messages=_synth_messages,
                         headers=headers, temperature=0.3, max_tokens=max_tokens, timeout=60,
                     )
-                    _synth = _strip_think_blocks(strip_tool_blocks(_raw or "")).strip()
+                    _synth = _THINK_RE.sub("", strip_tool_blocks(_raw or "")).strip()
                 except Exception as _e:
                     logger.warning(f"[agent] grace synthesis failed: {_e}")
                 if _synth:
@@ -3773,7 +3867,7 @@ async def stream_agent_loop(
             # the model fix them (capped, and it must do new effectful work
             # to re-trigger). Skipped on force-answer rounds (no tools to
             # fix with), pure Q&A, and when the toggle is off.
-            _claimed_done = bool(_strip_think_blocks(cleaned_round).strip())
+            _claimed_done = bool(_THINK_RE.sub("", cleaned_round).strip())
             if (_effectful_used and not _force_answer
                     and _claimed_done
                     and _verifier_rounds < _VERIFIER_MAX_ROUNDS
@@ -3817,22 +3911,19 @@ async def stream_agent_loop(
             # actual tool now") and loop again. Capped at
             # _MAX_INTENT_NUDGES so a model that genuinely cannot use the
             # tool doesn't pin us in a forever loop.
+            # Intent-without-action via IntentSupervisor
             _intent_text = _strip_think_blocks(cleaned_round).strip()
-            _intent_match = _INTENT_RE.search(_intent_text) if _intent_text else None
-            # Only nudge when the round REALLY looks like an unfinished
-            # promise: short response (<400 chars), no fenced code/answer,
-            # and an action-intent phrase was matched. Long answers that
-            # happen to contain "let me know" are not stalls.
+            _intent_match = _intent_supervisor._INTENT_RE.search(_intent_text) if _intent_text else None
             _looks_like_promise = (
                 not guide_only
                 and _intent_match is not None
                 and len(_intent_text) < 400
                 and "```" not in _intent_text
             )
-            if _looks_like_promise and _intent_nudge_count < _MAX_INTENT_NUDGES:
-                _intent_nudge_count += 1
+            if _looks_like_promise and _intent_supervisor.should_nudge():
+                _intent_supervisor.nudge()
                 _matched_phrase = _intent_match.group(0).strip()
-                logger.info(f"[agent] intent-without-action nudge #{_intent_nudge_count} on round {round_num}: {_matched_phrase!r}")
+                logger.info(f"[agent] intent-without-action nudge #{_intent_supervisor._nudge_count} on round {round_num}: {_matched_phrase!r}")
                 _lower_phrase = _matched_phrase.lower()
                 _cookbook_log_hint = ""
                 if any(_word in _lower_phrase for _word in ("log", "logs", "output", "tail", "status")):
@@ -3844,16 +3935,7 @@ async def stream_agent_loop(
                     )
                 messages.append({
                     "role": "system",
-                    "content": (
-                        f"You just wrote: \"{_matched_phrase}\" — but ended the "
-                        "turn without making the actual tool call. The user can "
-                        "see you announced the action but didn't run it, which "
-                        "is the most frustrating thing you can do. "
-                        "DO IT NOW: emit the actual function call this turn. "
-                        f"{_cookbook_log_hint}"
-                        "If you decided not to do it after all, say so plainly in "
-                        "one sentence instead of restating the plan."
-                    ),
+                    "content": RecoveryPrompts.intent_without_action(_matched_phrase, _cookbook_log_hint),
                 })
                 # Visible signal in the stream so the user knows we caught it.
                 yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
@@ -3867,7 +3949,7 @@ async def stream_agent_loop(
                 logger.warning(
                     "[agent] intent-without-action guard exhausted on round %d after %d nudges: %r",
                     round_num,
-                    _intent_nudge_count,
+                    _intent_supervisor._nudge_count,
                     _matched_phrase,
                 )
                 yield (
@@ -3877,7 +3959,7 @@ async def stream_agent_loop(
                         "reason": "intent_without_action_nudge_cap",
                         "message": _guard_message,
                         "round": round_num,
-                        "nudges": _intent_nudge_count,
+                        "nudges": _intent_supervisor._nudge_count,
                         "matched": _matched_phrase,
                     })
                     + "\n\n"
@@ -3896,63 +3978,53 @@ async def stream_agent_loop(
         # runaway backstop). On bail we don't give up — we force one
         # tool-free round so the model declares done or declares blocked,
         # mirroring Terminus's explicit-completion handshake.
-        _sig = "|".join(sorted(f"{b.tool_type}:{(b.content or '').strip()[:120]}" for b in tool_blocks))
-        _is_repeat = _sig in _recent_call_sigs
-        _recent_call_sigs.append(_sig)
-        for _b in tool_blocks:
-            _call_freq[f"{_b.tool_type}:{(_b.content or '').strip()[:120]}"] += 1
-        # "Real" answer text = round text minus <think> blocks. Empty-think
-        # rounds (just "<think>\n\n</think>" + a tool call) must not read as
-        # progress, so strip think before checking.
-        _real_text = _strip_think_blocks(cleaned_round).strip()
-        # Circling = repeating a recent call with nothing written. Any
-        # progress (a NEW distinct call, or actual answer text) resets it.
-        if _is_repeat and not _real_text:
-            _stuck_rounds += 1
-        else:
-            _stuck_rounds = 0
-        # Runaway = the SAME exact call repeated an absurd number of times.
-        # Distinct calls to one tool (a real batch) are legitimate work, so we
-        # count identical call signatures, not raw per-tool-type totals.
-        _runaway = _detect_runaway_call(_call_freq)
-        if _stuck_rounds >= 4 or _runaway:
-            reason = (f"calling {_runaway} with identical arguments over and over" if _runaway
-                      else "repeating the same tool calls without new progress")
-            logger.warning(f"[agent] loop-breaker tripped on round {round_num} ({reason}); sig={_sig[:80]!r}")
+        # Record round in loop detector
+        _sigs = [
+            StableSignature.from_tool_call(b.tool_type, (b.content or '').strip()[:120])
+            for b in tool_blocks
+        ]
+        _loop_detector.record_round(text=cleaned_round, tool_calls=_sigs)
+
+        # Check runaway via detector
+        if _loop_detector.is_runaway():
+            _runaway_tool = next(
+                (sig.split(":", 1)[0] for sig, count in _loop_detector._call_freq.items()
+                 if count >= _loop_detector.runaway_threshold),
+                "unknown",
+            )
+            reason = f"calling {_runaway_tool} with identical arguments over and over"
+            logger.warning(f"[agent] loop-breaker runaway on round {round_num}; tool={_runaway_tool}")
             yield (
                 "data: "
-                    + json.dumps({
+                + json.dumps({
                     "type": "loop_breaker_triggered",
-                    "reason": "loop_breaker_stall",
+                    "reason": "loop_breaker_runaway",
                     "message": (
-                        "The loop-breaker detected repeated tool calls without "
-                        "new progress, so the agent is being forced to stop "
-                        "using tools and give its best final answer."
+                        "The loop-breaker detected a runaway tool call, "
+                        "so the agent is being forced to stop using tools "
+                        "and give its best final answer."
                     ),
                     "round": round_num,
                     "detail": reason,
                 })
                 + "\n\n"
             )
-            # The model has been executing tools, so its results are already
-            # in context. Force ONE tool-free round to converge: write the
-            # answer from what it has, or state plainly what's blocking it.
-            # The force-answer handler above salvages (grace synthesis) or
-            # apologizes honestly if it still writes nothing.
-            _off = [t for t in ("web_search", "bash")
-                    if disabled_tools and t in disabled_tools]
-            _off_note = (f" ({', '.join(_off)} is currently disabled — say so if "
-                         f"you needed it.)" if _off else "")
             _force_answer = True
             messages.append({
                 "role": "system",
-                "content": (
-                    "You're repeating tool calls without converging. STOP calling "
-                    "tools and end the turn one of two ways: (a) write your best "
-                    "final answer NOW from the information already gathered, or "
-                    "(b) if you're genuinely blocked, say plainly what's blocking "
-                    "you in a sentence or two." + _off_note
-                ),
+                "content": RecoveryPrompts.runaway(_runaway_tool),
+            })
+            full_response += "\n\n"
+            yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
+            continue
+
+        stall_level = _loop_detector.check_stall()
+        if stall_level != RecoveryLevel.NONE:
+            logger.warning(f"[agent] loop-breaker stall on round {round_num}; level={stall_level}")
+            _force_answer = True
+            messages.append({
+                "role": "system",
+                "content": RecoveryPrompts.stall(stall_level),
             })
             full_response += "\n\n"
             yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
@@ -4506,6 +4578,36 @@ async def stream_agent_loop(
     )
     metrics["requested_model"] = requested_model
     yield f"data: {json.dumps({'type': 'metrics', 'data': metrics})}\n\n"
+
+    # ── Memory persistence hook ──────────────────────────────────────────
+    # After each turn, persist a summary of the agent's work to notes.md.
+    # This gives the checkpoint writer and future sessions access to what
+    # happened in this turn.
+    _mp_t = time.time()
+    try:
+        if session_id and full_response.strip():
+            import os
+            _mp_dir = os.environ.get("APP_DATA_DIR", "/app/data")
+            _mp_base = os.path.join(_mp_dir, "memory", session_id)
+            from src.agent.memory_persist import NotesStore
+            _mp_notes = NotesStore(_mp_base)
+
+            # Build a concise summary of what happened this turn
+            _mp_summary_parts = []
+            if tool_events:
+                _tools_used = [e.get("tool", "?") for e in tool_events[:5]]
+                _mp_summary_parts.append(f"Tools used: {', '.join(_tools_used)}")
+            _mp_response_preview = full_response[:300].replace("\n", " ").strip()
+            if _mp_response_preview:
+                _mp_summary_parts.append(f"Response: {_mp_response_preview}")
+
+            if _mp_summary_parts:
+                _mp_note = "\n".join(_mp_summary_parts)
+                _mp_notes.append(_mp_note)
+                logger.debug("[agent] Memory persistence: appended note (%d chars)", len(_mp_note))
+    except Exception as _mp_err:
+        logger.debug("[agent] Memory persistence skipped: %s", _mp_err)
+    prep_timings["memory_persist"] = time.time() - _mp_t
 
     # Teacher-escalation: inline takeover visible in the chat stream.
     # The student just finished; if Tier 1 flags failure, the teacher

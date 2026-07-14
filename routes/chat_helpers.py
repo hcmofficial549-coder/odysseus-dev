@@ -1,5 +1,6 @@
 """Shared helpers for chat routes — context building, post-response tasks, auth resolution."""
 
+from __future__ import annotations
 import asyncio
 import json
 import logging
@@ -114,6 +115,8 @@ class ChatContext:
     # Uploads attached to this user turn, resolved and owner-checked for the
     # agent's private context. This is not emitted to the browser.
     uploaded_files: list = field(default_factory=list)
+    # Direct reply from slash command — skip LLM, return messages directly
+    is_direct_reply: bool = False
 
 
 # ── Helpers ────────────────────────────────────────────────────────────── #
@@ -667,6 +670,26 @@ async def build_chat_context(
         auto_opened_docs=auto_opened_docs,
         allow_tool_preprocessing=allow_tool_preprocessing,
     )
+
+    # Check if this is a direct reply from a slash command (not a message to send to agent)
+    # Slash commands return a response that should be shown directly to the user
+    if preprocessed.enhanced_message and not preprocessed.text_for_context:
+        # This is a direct reply (e.g., from /compact, /goal, /dream, /status, /task)
+        # Return it as the assistant's response without sending to the agent
+        return ChatContext(
+            messages=[{"role": "assistant", "content": preprocessed.enhanced_message}],
+            preface=[],
+            rag_sources=[],
+            web_sources=[],
+            used_memories=[],
+            preset=extract_preset(chat_handler, preset_id),
+            context_length=0,
+            was_compacted=False,
+            user=None,
+            uprefs={},
+            preprocessed=preprocessed,
+            is_direct_reply=True,
+        )
 
     # Add user message to history
     add_user_message(sess, chat_handler, preprocessed, incognito=incognito)

@@ -265,6 +265,7 @@ if AUTH_ENABLED:
         "/api/auth/integrations/presets",
         "/api/health",
         "/api/version",
+        "/api/bookstack/config",
         "/login",
     }
     AUTH_EXEMPT_PREFIXES = ["/static"]
@@ -781,6 +782,18 @@ app.include_router(setup_cookbook_routes())
 
 from routes.workspace_routes import setup_workspace_routes
 app.include_router(setup_workspace_routes())
+
+# File Browser (browse, read, edit, upload, download server files)
+from routes.filebrowser_routes import setup_filebrowser_routes
+app.include_router(setup_filebrowser_routes())
+
+# Code Server (VS Code in browser) — reverse proxy
+from routes.code_server_routes import setup_code_server_routes
+app.include_router(setup_code_server_routes(), prefix="/api/code-server")
+
+# BookStack integration (external wiki platform)
+from routes.bookstack_routes import setup_bookstack_routes
+app.include_router(setup_bookstack_routes())
 
 # Hardware model fitting (cookbook "What Fits?" tab)
 from routes.hwfit_routes import setup_hwfit_routes

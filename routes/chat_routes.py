@@ -1,5 +1,6 @@
 """Chat routes — /api/chat, /api/chat_stream, /api/inject_context, /api/search."""
 
+from __future__ import annotations
 import asyncio
 import json
 import os
@@ -395,13 +396,16 @@ def _set_user_time_from_request(request: Request) -> None:
     try:
         tz_offset = request.headers.get("x-tz-offset")
         tz_name = request.headers.get("x-tz-name")
-        from src.user_time import clear_user_time_context, set_user_tz_name, set_user_tz_offset
+        from src.user_time import clear_user_time_context, set_user_tz_name, set_user_tz_offset, set_user_language
 
         clear_user_time_context()
         if tz_offset is not None:
             set_user_tz_offset(tz_offset)
         if tz_name:
             set_user_tz_name(tz_name)
+        lang = request.headers.get("x-language")
+        if lang:
+            set_user_language(lang)
     except Exception:
         pass
 
@@ -1012,6 +1016,20 @@ def setup_chat_routes(
             # the outer scope. (Was `nonlocal` but never reassigned.)
             research_sources = None
             web_sources = ctx.web_sources
+
+            # Direct reply from slash command — return immediately without LLM
+            if ctx.is_direct_reply:
+                for msg in ctx.messages:
+                    if msg.get("role") == "assistant":
+                        yield f"data: {json.dumps({'delta': msg.get('content', '')})}\n\n"
+                        yield "data: [DONE]\n\n"
+                        # Save to session history
+                        if not incognito:
+                            sess.add_message(ChatMessage("user", message))
+                            sess.add_message(ChatMessage("assistant", msg.get("content", "")))
+                            session_manager.save_sessions()
+                        _active_streams.pop(session, None)
+                        return
 
             # Register active stream for partial-save safety net
             _active_streams[session] = {"status": "streaming", "partial": "", "query": message, "is_research": effective_do_research, "mode": _effective_mode}

@@ -25,6 +25,9 @@ import galleryModule from './js/gallery.js';
 import tasksModule from './js/tasks.js?v=20260630tasksactivity';
 import calendarModule from './js/calendar.js';
 import notesModule from './js/notes.js';
+import fileBrowserModule from './js/fileBrowser.js';
+import codeServerModule from './js/codeServer.js';
+import bookstackModule from './js/bookstack.js';
 import adminModule from './js/admin.js';
 import settingsModule from './js/settings.js';
 // Eagerly bind unified minimize/restore behavior across all tool modals.
@@ -45,6 +48,7 @@ import spinnerModule from './js/spinner.js';
 import { initKeyboardShortcuts } from './js/keyboard-shortcuts.js';
 import { initSidebarLayout, syncRailSide } from './js/sidebar-layout.js';
 import { initSectionCollapse, initSectionDrag } from './js/section-management.js';
+import { initI18n, t, getLang, setLang, applyTranslations } from './js/i18n.js';
 
 const API_BASE = window.location.origin;
 window.themeModule = themeModule;
@@ -1094,6 +1098,33 @@ function initializeEventListeners() {
       }
     });
   }
+  // File Browser tool button
+  const toolFileBrowserBtn = el('tool-filebrowser-btn');
+  if (toolFileBrowserBtn) {
+    toolFileBrowserBtn.addEventListener('click', () => {
+      if (fileBrowserModule) {
+        fileBrowserModule.togglePanel();
+      }
+    });
+  }
+  // Code Server tool button
+  const toolCodeServerBtn = el('tool-codeserver-btn');
+  if (toolCodeServerBtn) {
+    toolCodeServerBtn.addEventListener('click', () => {
+      if (codeServerModule) {
+        codeServerModule.togglePanel();
+      }
+    });
+  }
+  // BookStack tool button
+  const toolBookStackBtn = el('tool-bookstack-btn');
+  if (toolBookStackBtn) {
+    toolBookStackBtn.addEventListener('click', () => {
+      if (bookstackModule) {
+        bookstackModule.togglePanel();
+      }
+    });
+  }
   // Refresh notes due-reminder badge on load and every 5 minutes
   if (notesModule && notesModule.refreshDueBadge) {
     notesModule.refreshDueBadge();
@@ -1223,6 +1254,21 @@ function initializeEventListeners() {
     '/gallery':  () => document.getElementById('tool-gallery-btn')?.click(),
     '/tasks':    () => document.getElementById('tool-tasks-btn')?.click(),
     '/library':  () => sessionModule && sessionModule.openLibrary && sessionModule.openLibrary(),
+    '/files':    () => {
+      if (fileBrowserModule) {
+        fileBrowserModule.openPanel();
+      }
+    },
+    '/code-editor': () => {
+      if (codeServerModule) {
+        codeServerModule.openPanel();
+      }
+    },
+    '/bookstack': () => {
+      if (bookstackModule) {
+        bookstackModule.openPanel();
+      }
+    },
   };
   const _opener = _routeOpen[urlPath];
   // Defer the opener — at this point in init, the modules whose handlers
@@ -2619,6 +2665,9 @@ function initializeEventListeners() {
     'tool-library':        '#tool-library-btn',
     'tool-memory':         '#tool-memory-btn',
     'tool-notes':          '#tool-notes-btn',
+    'tool-filebrowser':    '#tool-filebrowser-btn',
+    'tool-codeserver':     '#tool-codeserver-btn',
+    'tool-bookstack':      '#tool-bookstack-btn',
     'tool-tasks':          '#tool-tasks-btn',
     'tool-theme':          '#tool-theme-btn',
     'user-bar':            '#user-bar-profile',
@@ -3575,9 +3624,22 @@ function initializeEventListeners() {
 // ============================================
 // INITIALIZATION ON PAGE LOAD
 // ============================================
-function startOdysseusApp() {
+async function startOdysseusApp() {
   if (window.__odysseusAppStarted) return;
   window.__odysseusAppStarted = true;
+
+  // Initialize i18n before anything else uses translated strings
+  try { await initI18n(); } catch(e) { console.warn('i18n init failed:', e); }
+
+  // Apply translations to all static HTML elements with data-i18n attributes
+  try { applyTranslations(); } catch(e) { console.warn('applyTranslations failed:', e); }
+
+  // Re-apply translations when language changes
+  document.addEventListener('i18n:changed', (e) => {
+    // Only re-apply if this is NOT a reload-triggered change
+    if (!window.__i18nReloading) applyTranslations();
+  });
+
   const _bumpChatPriority = (ms = 10000) => {
     try {
       window.__odysseusChatBusyUntil = Math.max(window.__odysseusChatBusyUntil || 0, Date.now() + ms);
@@ -3660,6 +3722,9 @@ function startOdysseusApp() {
     'rail-tasks':     'tool-tasks-btn',
     'rail-calendar':  'tool-calendar-btn',
     'rail-notes':     'tool-notes-btn',
+    'rail-filebrowser': 'tool-filebrowser-btn',
+    'rail-codeserver':  'tool-codeserver-btn',
+    'rail-bookstack':   'tool-bookstack-btn',
     'rail-memory':    'tool-memory-btn',
     'rail-theme':     'tool-theme-btn',
     'rail-email':     'email-section-title',
@@ -4380,6 +4445,24 @@ function startOdysseusApp() {
       window.hljs.highlightElement(block);
     });
   }
+
+  // Re-apply translations after all modules have initialized
+  // (modules create DOM elements asynchronously during init)
+  requestAnimationFrame(() => {
+    applyTranslations();
+    // One more pass after a short delay for late-rendering modules
+    setTimeout(applyTranslations, 100);
+  });
+
+  // Auto-translate new elements as they're added to the DOM
+  new MutationObserver((mutations) => {
+    for (const m of mutations) {
+      for (const node of m.addedNodes) {
+        if (node.nodeType !== 1) continue;
+        applyTranslations(node);
+      }
+    }
+  }).observe(document.body, { childList: true, subtree: true });
 }
 
 if (document.readyState === 'loading') {

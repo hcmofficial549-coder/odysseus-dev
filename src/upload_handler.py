@@ -221,6 +221,8 @@ class UploadHandler:
         self._upload_rate_lock = threading.Lock()
         self._upload_rate_counter = 0
         self._upload_rate_max_entries = 1000
+        self._index_cache: Optional[Dict[str, Any]] = None
+        self._index_mtime: float = 0.0
         # Serialise the read-modify-write of uploads.json within one
         # Python process. Scope: single FastAPI worker (the default
         # uvicorn deployment). Cross-process / multi-worker deployments
@@ -239,10 +241,6 @@ class UploadHandler:
         except Exception:
             self.file_detector = None
             logger.warning("python-magic not available, falling back to basic detection")
-
-        # In-memory index cache to avoid O(N) disk I/O on every request
-        self._index_cache: Optional[Dict[str, Any]] = None
-        self._index_mtime: float = 0.0
     
     def inside_base_dir(self, path: str) -> bool:
         """Check if path is inside base directory"""
@@ -772,10 +770,7 @@ class UploadHandler:
             try:
                 with open(candidate, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                if isinstance(data, dict):
-                    self._index_cache = data
-                    self._index_mtime = mtime
-                    return data
+                return data if isinstance(data, dict) else {}
             except Exception as e:
                 logger.warning(f"Failed to read uploads database ({candidate}): {e}")
                 continue
@@ -933,23 +928,14 @@ class UploadHandler:
             return resolved
 
     def _renamed_upload_index_key(self, key: str, info: Dict[str, Any], old_owner: str, new_owner: str) -> str:
-        """Return the storage key to use after renaming an owned upload row.
-
-        Harden against usernames with colons by using the explicit metadata
-        fields instead of trying to parse the key string.
-        """
+        """Return the storage key to use after renaming an owned upload row."""
+        if isinstance(key, str) and ":" in key:
+            owner_part, rest = key.split(":", 1)
+            if owner_part.strip().lower() == old_owner:
+                return f"{new_owner}:{rest}"
         file_hash = info.get("hash")
         if file_hash:
             return f"{new_owner}:{file_hash}"
-
-        # Fallback for rows without an explicit hash (should not happen in modern Odysseus)
-        if isinstance(key, str) and ":" in key:
-            # Join all but the last part if there are multiple colons
-            parts = key.rsplit(":", 1)
-            if len(parts) == 2:
-                owner_part, rest = parts[0], parts[1]
-                if owner_part.strip().lower() == old_owner.strip().lower():
-                    return f"{new_owner}:{rest}"
         return key
 
     def _unique_upload_index_key(self, base_key: str, used_keys: set, reserved_keys: set, info: Dict[str, Any]) -> str:
@@ -1116,8 +1102,11 @@ class UploadHandler:
             total_size = 0
             file_types = {}
             
-            files = self._load_upload_index()
-            if files:
+            uploads_db_path = os.path.join(self.upload_dir, "uploads.json")
+            if os.path.exists(uploads_db_path):
+                with open(uploads_db_path, "r", encoding="utf-8") as f:
+                    files = json.load(f)
+                
                 total_files = len(files)
                 for file_info in files.values():
                     total_size += file_info.get("size", 0)

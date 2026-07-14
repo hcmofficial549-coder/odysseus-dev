@@ -269,7 +269,7 @@ function _recipientChipHtml(full, label, extraClass = '') {
   const addr = _emailAddressFromRecipientText(fullText);
   const labelText = String(label || addr || fullText || '').trim();
   const cls = `recipient-chip${extraClass ? ` ${extraClass}` : ''}`;
-  return `<span class="${cls}" data-full="${_esc(fullText || labelText)}" data-email="${_esc(addr)}" title="Click for details"><span class="recipient-chip-label">${_esc(labelText)}</span><button type="button" class="recipient-chip-copy" title="Copy email" aria-label="Copy email" hidden>${_COPY_EMAIL_ICON}</button></span>`;
+  return `<span class="${cls}" data-full="${_esc(fullText || labelText)}" data-email="${_esc(addr)}" title="Click for details"><span class="recipient-chip-label">${_esc(labelText)}</span><button type="button" class="recipient-chip-copy" title="${(window.__t || (k=>k))('common.copy')}" aria-label="${(window.__t || (k=>k))('common.copy')}" hidden>${_COPY_EMAIL_ICON}</button></span>`;
 }
 
 let _recipientChipPopoverCtl = null;
@@ -360,14 +360,15 @@ function _wireRecipientChips(root) {
         const copied = await _copyTextToClipboard(email);
         if (!copied) throw new Error('copy failed');
         copyBtn.classList.add('copied');
-        copyBtn.title = 'Copied';
-        showToast?.('Email copied');
+        const _t = window.__t || (k=>k);
+        copyBtn.title = _t('common.copied');
+        showToast?.(_t('common.copied'));
         setTimeout(() => {
           copyBtn.classList.remove('copied');
-          copyBtn.title = 'Copy email';
+          copyBtn.title = _t('common.copy');
         }, 900);
       } catch (_) {
-        showToast?.('Copy failed');
+        showToast?.((window.__t || (k=>k))('common.copy') + ' failed');
       }
       return;
     }
@@ -487,14 +488,15 @@ function _toggleUnreadEmails() {
 }
 
 function _syncUnreadTabBadge(count) {
-  const label = count > 999 ? '999+ unread' : `${count} unread`;
+  const _t = (window.__t || (k=>k));
+  const label = count > 999 ? '999+' : _t('email.unread').replace('{n}', String(count));
   document.querySelectorAll('.minimized-dock-chip[data-modal-id="email-lib-modal"]').forEach(chip => {
     if (count > 0) {
       chip.dataset.emailUnreadLabel = label;
-      chip.title = `Open ${label}`;
+      chip.title = _t('email.showUnreadEmails');
     } else {
       delete chip.dataset.emailUnreadLabel;
-      chip.title = 'Restore Email';
+      chip.title = (window.__t || (k=>k))('nav.email');
     }
   });
 }
@@ -720,7 +722,7 @@ async function _deleteEmailAndAdvance(em, card, opts = {}) {
   if (!em || em.uid == null) return;
   if (opts.confirm !== false) {
     const subject = em.subject || '(no subject)';
-    const ok = await styledConfirm(`Delete "${subject}"?`, { confirmText: 'Delete', cancelText: 'Cancel', danger: true });
+    const ok = await styledConfirm(`Delete "${subject}"?`, { confirmText: (window.__t || (k=>k))('email.delete'), cancelText: (window.__t || (k=>k))('common.cancel'), danger: true });
     if (!ok) return;
   }
   const busy = _showEmailDeleteOverlay(card);
@@ -735,7 +737,7 @@ async function _deleteEmailAndAdvance(em, card, opts = {}) {
   } catch (err) {
     console.error('Failed to delete email:', err);
     busy?.remove?.();
-    showToast('Failed to delete email');
+    showToast((window.__t || (k=>k))('email.failedToDelete'));
     return;
   }
   busy?.remove?.();
@@ -745,7 +747,7 @@ async function _deleteEmailAndAdvance(em, card, opts = {}) {
   _updateBulkBar();
   _renderGrid();
   _libCacheWriteBack();
-  showToast('Moved to Trash');
+  showToast((window.__t || (k=>k))('email.movedToTrash'));
   if (!wasExpanded || !nextUid) return;
   const grid = document.getElementById('email-lib-grid');
   const nextCard = grid?.querySelector(`.doclib-card[data-uid="${CSS.escape(String(nextUid))}"]`);
@@ -973,7 +975,7 @@ function _resetEmailListForFreshLoad() {
   const grid = document.getElementById('email-lib-grid');
   if (grid) _renderEmailLoading(grid);
   const stats = document.getElementById('email-lib-stats');
-  if (stats) stats.textContent = 'Loading...';
+  if (stats) stats.textContent = (window.__t || (k=>k))('common.loading');
   _setEmailSyncStatus({ loading: true });
 }
 
@@ -1226,15 +1228,15 @@ export function openEmailLibrary(opts = {}) {
         <div class="admin-card" style="flex:1;flex-direction:column;display:flex;overflow:hidden;">
           <div class="email-accounts-row">
             <div id="email-lib-accounts" style="display:flex;gap:4px;flex:1;min-width:0;"></div>
-            <button class="memory-toolbar-btn email-compose-jiggle" id="email-lib-compose-btn">
+               <button class="memory-toolbar-btn email-compose-jiggle" id="email-lib-compose-btn">
               <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px;margin-right:3px;"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/></svg>
-              New
+              ${(window.__t || (k=>k))('email.compose')}
             </button>
           </div>
           <div class="memory-toolbar">
             <div class="memory-category-filters">
               <select class="memory-sort-select" id="email-lib-folder" style="flex:1;min-width:0;text-overflow:ellipsis;">
-                <option value="INBOX">Inbox</option>
+                <option value="INBOX">${(window.__t || (k=>k))('email.inbox')}</option>
               </select>
               <!-- Hidden native select kept as the source of truth — all
                    existing change handlers still fire via the custom picker
@@ -1279,7 +1281,7 @@ export function openEmailLibrary(opts = {}) {
               <div class="email-lib-chip-bar memory-search-input" id="email-lib-chip-bar" style="width:100%;padding-right:134px;padding-left:26px;display:flex;align-items:center;flex-wrap:wrap;gap:4px;cursor:text;min-height:30px;position:relative;">
                 <svg class="email-lib-chip-bar-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="position:absolute;left:8px;top:50%;transform:translateY(-50%);pointer-events:none;color:var(--accent, var(--red));"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.35-4.35"/></svg>
                 <span id="email-lib-pills" style="display:contents"></span>
-                <input type="text" id="email-lib-search" placeholder="Search by name or text" autocomplete="off" style="flex:1;min-width:80px;border:0;outline:none;background:transparent;color:inherit;font:inherit;padding:0;position:relative;top:-1px;" />
+                <input type="text" id="email-lib-search" placeholder="${(window.__t || (k=>k))('email.searchPlaceholder')}" autocomplete="off" style="flex:1;min-width:80px;border:0;outline:none;background:transparent;color:inherit;font:inherit;padding:0;position:relative;top:-1px;" />
               </div>
               <div id="email-lib-suggest" style="display:none;position:absolute;top:calc(100% + 2px);left:0;right:0;z-index:60;background:var(--panel,var(--bg));border:1px solid var(--border);border-radius:6px;box-shadow:0 6px 18px rgba(0,0,0,0.25);max-height:240px;overflow-y:auto;"></div>
               <button class="memory-toolbar-btn email-undone-toggle email-undone-toggle-inline" id="email-undone-btn" title="Show only emails not marked as done (undone)">
@@ -1301,14 +1303,14 @@ export function openEmailLibrary(opts = {}) {
             <label class="memory-bulk-check-all" style="position:relative;top:0px;"><input type="checkbox" id="email-lib-select-all"> All</label>
             <span id="email-lib-selected-count" style="position:relative;top:1px;">0 Selected</span>
             <button class="memory-toolbar-btn" id="email-lib-bulk-actions" style="position:relative;top:-2px;"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:3px;"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>Actions <span style="opacity:0.55;font-size:9px;">▼</span></button>
-            <button class="memory-toolbar-btn" id="email-lib-bulk-delete" style="position:relative;top:-2px;"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:3px;"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>Delete</button>
+            <button class="memory-toolbar-btn" id="email-lib-bulk-delete" style="position:relative;top:-2px;"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:3px;"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>${(window.__t || (k=>k))('common.delete')}</button>
             <button class="memory-toolbar-btn" id="email-lib-bulk-cancel" title="Cancel (Esc)" style="margin-left:4px;padding:3px 6px;position:relative;top:-2px;"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
           </div>
           <div id="email-lib-grid" class="doclib-grid"></div>
           <div id="email-lib-sync-status" class="email-lib-sync-status" aria-live="polite"></div>
           <button class="email-lib-fab" id="email-lib-fab" type="button" aria-label="New email">
             <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="4.5" width="19" height="15" rx="2.5"/><path d="M3 6.5l9 6 9-6"/></svg>
-            <span class="email-lib-fab-label">New</span>
+            <span class="email-lib-fab-label">${(window.__t || (k=>k))('email.compose')}</span>
           </button>
         </div>
       </div>
@@ -1457,8 +1459,8 @@ export function openEmailLibrary(opts = {}) {
   }
   document.getElementById('email-reminders-clear-btn')?.addEventListener('click', async () => {
     const ok = await styledConfirm('Permanently delete all Odysseus reminder emails?', {
-      confirmText: 'Delete',
-      cancelText: 'Cancel',
+      confirmText: (window.__t || (k=>k))('email.delete'),
+      cancelText: (window.__t || (k=>k))('common.cancel'),
       danger: true,
     });
     if (!ok) return;
@@ -1483,7 +1485,7 @@ export function openEmailLibrary(opts = {}) {
       _loadEmailsFresh();
     } catch (err) {
       console.error(err);
-      showToast('Failed to clear reminder emails');
+    showToast((window.__t || (k=>k))('email.failedToDeleteEmail'));
     }
   });
   document.getElementById('email-undone-btn')?.addEventListener('click', () => {
@@ -1662,8 +1664,8 @@ export function openEmailLibrary(opts = {}) {
   const _setSelectBtnState = (on) => {
     const btn = document.getElementById('email-lib-select-btn');
     if (!btn) return;
-    if (on) { btn.classList.add('active'); btn.innerHTML = _SELECT_BTN_X_SVG + 'Cancel'; }
-    else { btn.classList.remove('active'); btn.innerHTML = _SELECT_BTN_DOT_SVG + 'Select'; }
+    if (on) { btn.classList.add('active'); btn.innerHTML = _SELECT_BTN_X_SVG + (window.__t || (k=>k))('common.cancel'); }
+    else { btn.classList.remove('active'); btn.innerHTML = _SELECT_BTN_DOT_SVG + (window.__t || (k=>k))('email.select'); }
   };
   document.getElementById('email-lib-select-btn').addEventListener('click', () => {
     state._selectMode = !state._selectMode;
@@ -1697,7 +1699,7 @@ export function openEmailLibrary(opts = {}) {
   document.getElementById('email-lib-bulk-actions').addEventListener('click', (e) => {
     e.stopPropagation();
     if (state._selectedUids.size === 0) {
-      showToast('Select emails first');
+      showToast((window.__t || (k=>k))('email.selectEmailsFirst'));
       return;
     }
     _showBulkActionsMenu(e.currentTarget);
@@ -1705,7 +1707,7 @@ export function openEmailLibrary(opts = {}) {
   document.getElementById('email-lib-bulk-delete')?.addEventListener('click', (e) => {
     e.stopPropagation();
     if (state._selectedUids.size === 0) {
-      showToast('Select emails first');
+      showToast((window.__t || (k=>k))('email.selectEmailsFirst'));
       return;
     }
     _bulkAction('delete');
@@ -2113,7 +2115,7 @@ async function _loadFolders({ resetMissing = false } = {}) {
     sel.appendChild(sep2);
     const schedOpt = document.createElement('option');
     schedOpt.value = '__scheduled__';
-    schedOpt.textContent = 'Scheduled';
+    schedOpt.textContent = (window.__t || (k=>k))('email.scheduled');
     if (state._libFolder === '__scheduled__') schedOpt.selected = true;
     sel.appendChild(schedOpt);
     sel.value = state._libFolder;
@@ -2892,7 +2894,7 @@ async function _doSearch() {
   // the server search is still grinding.
   const stats = document.getElementById('email-lib-stats');
   const originalStatsText = stats?.textContent || '';
-  if (stats) stats.textContent = 'Searching…';
+  if (stats) stats.textContent = (window.__t || (k=>k))('email.searching');
   _libSearchInFlight = true;
   _setEmailSyncStatus({ loading: true });
   // Force a re-render so the "Searching…" empty-state shows (and any
@@ -2994,12 +2996,13 @@ async function _doSearch() {
     }
     _renderGrid();
     const count = Math.max(Number(data.total || 0), results.length);
+    const _t = window.__t || (k=>k);
     if (stats) {
       if (interim) {
-        stats.textContent = `${count} cached match${count === 1 ? '' : 'es'} · searching…`;
+        stats.textContent = `${count} ${_t('email.cachedMatches')} · ${_t('common.searching')}`;
       } else {
-        const source = data.source === 'index' ? ' cached' : '';
-        stats.textContent = `${count}${source} match${count === 1 ? '' : 'es'}`;
+        const source = data.source === 'index' ? ` ${_t('email.cached')}` : '';
+        stats.textContent = `${count}${source} ${_t('email.matches')}`;
       }
     }
     _setEmailSyncStatus({
@@ -3040,7 +3043,7 @@ async function _doSearch() {
     if (!stillCurrent()) return;
     paintSearchData(data, false);
   } catch (e) {
-    if (stats) stats.textContent = originalStatsText || 'Search failed';
+    if (stats) stats.textContent = originalStatsText || (window.__t || (k=>k))('email.searchFailed');
     try { console.error('[email-search] fetch failed:', e); } catch {}
   } finally {
     _libSearchInFlight = false;
@@ -3151,7 +3154,7 @@ function _renderEmailLoading(grid) {
   grid.innerHTML = '';
   const wrap = document.createElement('div');
   wrap.className = 'email-list-skeleton';
-  wrap.setAttribute('aria-label', 'Loading emails');
+  wrap.setAttribute('aria-label', (window.__t || (k=>k))('email.loadingEmails'));
   wrap.innerHTML = Array.from({ length: 8 }, (_, idx) => `
     <div class="email-skeleton-row${idx % 3 === 2 ? ' compact' : ''}">
       <span class="email-skeleton-dot"></span>
@@ -3232,17 +3235,17 @@ async function _refreshUnreadBadge() {
         const allRes = await fetch(`${API_BASE}/api/email/list?folder=${encodeURIComponent(folder)}${_acct()}&limit=1&filter=all`);
         const allData = await allRes.json();
         const t = allData.total || 0;
-        badge.textContent = `${t} all`;
-        badge.title = 'Show all emails';
+        badge.textContent = (window.__t || (k=>k))('email.all').replace('{n}', String(t));
+        badge.title = (window.__t || (k=>k))('email.showAllEmails');
         badge.style.display = '';
       } catch (_) {
-        badge.textContent = 'Show all';
-        badge.title = 'Show all emails';
+        badge.textContent = (window.__t || (k=>k))('email.showAll');
+        badge.title = (window.__t || (k=>k))('email.showAllEmails');
         badge.style.display = '';
       }
     } else if (n > 0) {
-      badge.textContent = n > 999 ? '999+ unread' : `${n} unread`;
-      badge.title = 'Show unread emails';
+      badge.textContent = n > 999 ? '999+' : (window.__t || (k=>k))('email.unread').replace('{n}', String(n));
+      badge.title = (window.__t || (k=>k))('email.showUnreadEmails');
       badge.style.display = '';
     } else {
       badge.style.display = 'none';
@@ -3291,8 +3294,7 @@ async function _loadEmails({ force = false, useCache = true } = {}) {
     const grid2 = document.getElementById('email-lib-grid');
     if (grid2) grid2.classList.remove('email-lib-just-opened');
     _renderGrid();
-    const stats = document.getElementById('email-lib-stats');
-    if (stats) stats.textContent = `${state._libTotal} emails`;
+    if (stats) stats.textContent = `${state._libTotal} ${(window.__t || (k=>k))('email.emails')}`;
     const sync = cached.sync || {};
     _setEmailSyncStatus({
       updatedAt: sync.updated_at || '',
@@ -3335,7 +3337,7 @@ async function _loadEmails({ force = false, useCache = true } = {}) {
         _renderGrid();
       }
       const stats = document.getElementById('email-lib-stats');
-      if (stats) stats.textContent = `${state._libTotal} emails`;
+      if (stats) stats.textContent = `${state._libTotal} ${(window.__t || (k=>k))('email.emails')}`;
       _setEmailSyncStatus({
         updatedAt: sync.updated_at || '',
         source: sync.source || '',
@@ -3366,7 +3368,7 @@ async function _loadScheduled(grid, sp) {
   const items = data.scheduled || [];
   grid.innerHTML = '';
   const stats = document.getElementById('email-lib-stats');
-  if (stats) stats.textContent = `${items.length} scheduled`;
+  if (stats) stats.textContent = `${items.length} ${(window.__t || (k=>k))('email.scheduled')}`;
   _setEmailSyncStatus({
     updatedAt: new Date().toISOString(),
     source: 'local',
@@ -3374,7 +3376,7 @@ async function _loadScheduled(grid, sp) {
   });
 
   if (items.length === 0) {
-    grid.innerHTML = '<div class="email-loading">No scheduled emails</div>';
+    grid.innerHTML = '<div class="email-loading">' + ((window.__t || (k=>k))('email.noScheduled')) + '</div>';
     return;
   }
 
@@ -3407,12 +3409,12 @@ async function _loadScheduled(grid, sp) {
     // Cancel button
     const cancelBtn = document.createElement('button');
     cancelBtn.className = 'memory-item-btn';
-    cancelBtn.title = 'Cancel scheduled send';
+    cancelBtn.title = (window.__t || (k=>k))('email.cancelScheduledSend');
     cancelBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
     cancelBtn.addEventListener('click', async (e) => {
       e.stopPropagation();
       const { styledConfirm } = await import('./ui.js');
-      const ok = await styledConfirm(`Cancel scheduled email "${subject}"?`, { confirmText: 'Cancel Send', cancelText: 'Keep', danger: true });
+      const ok = await styledConfirm(`Cancel scheduled email "${subject}"?`, { confirmText: (window.__t || (k=>k))('common.cancel'), cancelText: 'Keep', danger: true });
       if (!ok) return;
       try {
         await fetch(`${API_BASE}/api/email/scheduled/${it.id}`, { method: 'DELETE' });
@@ -3518,10 +3520,11 @@ function _renderGrid() {
       && (!state._libFilter || state._libFilter === 'all')
       && !(state._libSearch || '').trim()
     );
+    const _t = window.__t || (k=>k);
     if (_isTrulyEmpty) {
       grid.innerHTML =
         '<div class="email-loading" style="display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;text-align:center;">' +
-          '<span>No emails' + _smileyIco + '</span>' +
+          '<span>' + _t('email.noEmails') + _smileyIco + '</span>' +
           '<span style="opacity:0.7;font-size:11px;">' +
             'Set up at: <a href="#" data-open-settings="integrations" style="color:var(--accent,var(--red));text-decoration:underline;">Settings &rsaquo; Integrations</a>' +
           '</span>' +
@@ -3534,7 +3537,7 @@ function _renderGrid() {
     } else {
       grid.innerHTML =
         '<div class="email-loading" style="display:flex;align-items:center;justify-content:center;gap:8px;flex-wrap:wrap;">' +
-          '<span>No emails' + _smileyIco + '</span>' +
+          '<span>' + _t('email.noEmails') + _smileyIco + '</span>' +
         '</div>';
     }
     return;
@@ -3691,7 +3694,7 @@ function _createCard(em) {
   if (!isSentFolder) {
     const doneCheck = document.createElement('span');
     doneCheck.className = 'email-card-done' + (em.is_answered ? ' active' : '');
-    doneCheck.title = em.is_answered ? 'Mark not done' : 'Mark done';
+    doneCheck.title = em.is_answered ? (window.__t || (k=>k))('email.markAsNotDone') : (window.__t || (k=>k))('email.markAsDone');
     doneCheck.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
     const _toggleDone = async (e) => {
       if (e) e.stopPropagation();
@@ -3702,7 +3705,7 @@ function _createCard(em) {
       const newState = !wasActive;
       em.is_answered = newState;
       doneCheck.classList.toggle('active', newState);
-      doneCheck.title = newState ? 'Mark not done' : 'Mark done';
+      doneCheck.title = newState ? (window.__t || (k=>k))('email.markAsNotDone') : (window.__t || (k=>k))('email.markAsDone');
       // Animate in both directions so the user gets explicit feedback when
       // un-checking too — without this the hover state and the active state
       // look identical, so the click felt like a no-op.
@@ -3736,7 +3739,7 @@ function _createCard(em) {
 
   if (em.is_flagged) {
     const star = document.createElement('span');
-    star.title = 'Favorited';
+    star.title = (window.__t || (k=>k))('email.favorite');
     star.style.cssText = 'color:var(--accent, var(--red));opacity:0.85;flex-shrink:0;display:inline-flex;';
     star.innerHTML = '<svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>';
     titleRow.appendChild(star);
@@ -3748,8 +3751,8 @@ function _createCard(em) {
   const navArrows = document.createElement('span');
   navArrows.className = 'email-card-nav-arrows';
   navArrows.innerHTML = `
-    <button type="button" class="email-card-nav-btn" data-nav-dir="-1" title="Previous email"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg></button>
-    <button type="button" class="email-card-nav-btn" data-nav-dir="1" title="Next email"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg></button>
+    <button type="button" class="email-card-nav-btn" data-nav-dir="-1" title="${(window.__t || (k=>k))('email.previousEmail')}"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg></button>
+    <button type="button" class="email-card-nav-btn" data-nav-dir="1" title="${(window.__t || (k=>k))('email.nextEmail')}"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg></button>
   `;
   navArrows.addEventListener('click', async (ev) => {
     const btn = ev.target.closest('.email-card-nav-btn');
@@ -3794,7 +3797,7 @@ function _createCard(em) {
     actionsWrap.className = 'memory-item-actions';
     const menuBtn = document.createElement('button');
     menuBtn.className = 'memory-item-btn';
-    menuBtn.title = 'Actions';
+    menuBtn.title = (window.__t || (k=>k))('email.actions');
     menuBtn.style.position = 'relative';
     menuBtn.style.top = '-1px';
     menuBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg>';
@@ -4037,20 +4040,20 @@ async function _toggleCardPreview(card, em) {
         <div class="email-reader-meta">
           <div class="email-reader-meta-row email-reader-meta-from">
             <strong>From:</strong>
-            <span class="recipient-chips">${fromChip}${(data.to || data.cc) ? `<button class="email-reader-meta-toggle" type="button" aria-expanded="false" title="Show recipients"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></button>` : ''}</span>
+            <span class="recipient-chips">${fromChip}${(data.to || data.cc) ? `<button class="email-reader-meta-toggle" type="button" aria-expanded="false" title="${(window.__t || (k=>k))('email.showRecipients')}"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></button>` : ''}</span>
           </div>
           ${(data.to || data.cc) ? `<div class="email-reader-meta-details" hidden>
             ${data.to ? `<div class="email-reader-meta-row"><strong>To:</strong><span class="recipient-chips">${buildRecipients(data.to)}</span></div>` : ''}
             ${data.cc ? `<div class="email-reader-meta-row"><strong>Cc:</strong><span class="recipient-chips">${buildRecipients(data.cc)}</span></div>` : ''}
           </div>` : ''}
           <div class="email-reader-actions-inline">
-            <button class="memory-toolbar-btn reader-icon-btn" data-act="ai-reply" title="${data.cached_ai_reply ? 'AI Reply (cached draft ready)' : 'AI Reply (suggest a draft)'}">${_aiReplyIcon(data)}<span class="reader-btn-label">AI reply</span></button>
-            <button class="memory-toolbar-btn reader-icon-btn" data-act="reply" title="Reply"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 17 4 12 9 7"/><path d="M20 18v-2a4 4 0 0 0-4-4H4"/></svg><span class="reader-btn-label">Reply</span></button>
-            ${_hasMultipleRecipients(data) ? `<button class="memory-toolbar-btn reader-icon-btn" data-act="reply-all" title="Reply All"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="7 17 2 12 7 7"/><polyline points="12 17 7 12 12 7"/><path d="M22 18v-2a4 4 0 0 0-4-4H7"/></svg><span class="reader-btn-label">Reply all</span></button>` : ''}
-            <button class="memory-toolbar-btn reader-icon-btn" data-act="forward" title="Forward"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 17 20 12 15 7"/><path d="M4 18v-2a4 4 0 0 1 4-4h12"/></svg><span class="reader-btn-label">Forward</span></button>
-            <button class="memory-toolbar-btn reader-icon-btn" data-act="summarize" title="Summarize">${_summaryIcon(data)}<span class="reader-btn-label">Summary</span></button>
+            <button class="memory-toolbar-btn reader-icon-btn" data-act="ai-reply" title="${(window.__t || (k=>k))('email.aiReply')}">${_aiReplyIcon(data)}<span class="reader-btn-label">${(window.__t || (k=>k))('email.aiReply')}</span></button>
+            <button class="memory-toolbar-btn reader-icon-btn" data-act="reply" title="${(window.__t || (k=>k))('email.reply')}"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 17 4 12 9 7"/><path d="M20 18v-2a4 4 0 0 0-4-4H4"/></svg><span class="reader-btn-label">${(window.__t || (k=>k))('email.reply')}</span></button>
+            ${_hasMultipleRecipients(data) ? `<button class="memory-toolbar-btn reader-icon-btn" data-act="reply-all" title="${(window.__t || (k=>k))('email.replyAll')}"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="7 17 2 12 7 7"/><polyline points="12 17 7 12 12 7"/><path d="M22 18v-2a4 4 0 0 0-4-4H7"/></svg><span class="reader-btn-label">${(window.__t || (k=>k))('email.replyAll')}</span></button>` : ''}
+            <button class="memory-toolbar-btn reader-icon-btn" data-act="forward" title="${(window.__t || (k=>k))('email.forward')}"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 17 20 12 15 7"/><path d="M4 18v-2a4 4 0 0 1 4-4h12"/></svg><span class="reader-btn-label">${(window.__t || (k=>k))('email.forward')}</span></button>
+            <button class="memory-toolbar-btn reader-icon-btn" data-act="summarize" title="${(window.__t || (k=>k))('email.summary')}">${_summaryIcon(data)}<span class="reader-btn-label">${(window.__t || (k=>k))('email.summary')}</span></button>
             <div class="email-reader-more-wrap" style="position:relative">
-              <button class="memory-toolbar-btn reader-icon-btn" data-act="more" title="More actions"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg><span class="reader-btn-label">More</span></button>
+              <button class="memory-toolbar-btn reader-icon-btn" data-act="more" title="${(window.__t || (k=>k))('email.moreActions')}"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg><span class="reader-btn-label">${(window.__t || (k=>k))('email.more')}</span></button>
             </div>
           </div>
         </div>
@@ -4191,7 +4194,7 @@ async function _toggleCardPreview(card, em) {
     // Always stop bubbling so the card's click doesn't fire while reading.
     reader.addEventListener('click', (ev) => { ev.stopPropagation(); });
   } catch (e) {
-    reader.innerHTML = `<div style="padding:20px;color:var(--red,#e55)">Failed to load email</div>`;
+    reader.innerHTML = `<div style="padding:20px;color:var(--red,#e55)">${(window.__t || (k=>k))('email.loadingEmails')}…</div>`;
   }
 }
 
@@ -5008,15 +5011,13 @@ function _showCachedSummary(reader, summary, btn) {
   panel.innerHTML =
     '<div class="email-summary-header email-summary-toggle" role="button" tabindex="0">'
     +   '<svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0L14.59 8.41L23 12L14.59 15.59L12 24L9.41 15.59L1 12L9.41 8.41Z"/></svg>'
-    +   '<span>Summary</span>'
+    +   '<span>' + (window.__t || (k=>k))('email.summary') + '</span>'
     +   '<svg class="email-summary-chevron" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-left:auto;transition:transform .15s ease;"><polyline points="6 9 12 15 18 9"/></svg>'
     + '</div>'
     + '<div class="email-summary-content"></div>';
   panel.querySelector('.email-summary-content').textContent = summary;
   body.insertBefore(panel, body.firstChild);
   const toggle = panel.querySelector('.email-summary-toggle');
-  // Header click folds/unfolds. Persists so the next email opens in the
-  // same state.
   const _flip = () => {
     panel.classList.toggle('collapsed');
     _setSummaryCollapsedPref(panel.classList.contains('collapsed'));
@@ -5030,7 +5031,7 @@ function _showCachedSummary(reader, summary, btn) {
   if (btn) {
     btn.classList.add('active');
     const label = btn.querySelector('.btn-label');
-    if (label) label.textContent = 'Summary';
+    if (label) label.textContent = (window.__t || (k=>k))('email.summary');
   }
 }
 
@@ -5162,8 +5163,8 @@ async function _toggleFromSenderPanel(reader, data, btn) {
     if (panel._attachmentsOnly) view = view.filter(e => e.has_attachments);
     if (!view.length) {
       const why = panel._attachmentsOnly
-        ? 'No emails with attachments in this view.'
-        : (panel._tags.length > 1 ? 'No emails involve all those people.' : 'No matches.');
+        ? (window.__t || (k=>k))('email.noEmails')
+        : (panel._tags.length > 1 ? (window.__t || (k=>k))('email.noEmails') : (window.__t || (k=>k))('email.noEmails'));
       listEl.innerHTML = `<div class="from-sender-empty">${why}</div>`;
     } else {
       _renderFromSenderRows(view, listEl, reader, { showFolder: !!panel._lastShowFolder });
@@ -5219,7 +5220,7 @@ async function _toggleFromSenderPanel(reader, data, btn) {
     if (!searchEl) return;
     searchEl.placeholder = panel._tags.length
       ? 'Add another person…'
-      : 'Search people or emails…';
+      : (window.__t || (k=>k))('email.searchPlaceholder');
   };
   updatePlaceholder();
   _renderChips();
@@ -5456,7 +5457,7 @@ function _renderFromSenderRows(emails, listEl, reader, opts = {}) {
           ${folderChip}
         </span>
       </button>
-      <button class="from-sender-row-more" type="button" title="More actions" aria-label="More actions">
+      <button class="from-sender-row-more" type="button" title="${(window.__t || (k=>k))('email.moreActions')}" aria-label="${(window.__t || (k=>k))('email.moreActions')}">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="19" cy="12" r="1.7"/></svg>
       </button>
     </div>`;
@@ -5733,7 +5734,7 @@ function _buildAttsHtmlFor(uid, data) {
     const chipUid = a.source_uid || a.uid || uid;
     const chipFolder = a.source_folder || data.folder || state._libFolder || 'INBOX';
     const openBtn = openable
-      ? `<span class="email-attachment-open" title="Open in document editor" data-open-uid="${_esc(chipUid)}" data-open-index="${a.index}" data-open-name="${_esc(a.filename)}" data-open-folder="${_esc(chipFolder)}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="16" y2="17"/><line x1="8" y1="9" x2="10" y2="9"/></svg><span class="email-attachment-open-label">Open</span></span>`
+      ? `<span class="email-attachment-open" title="${(window.__t || (k=>k))('email.openInDocumentEditor')}" data-open-uid="${_esc(chipUid)}" data-open-index="${a.index}" data-open-name="${_esc(a.filename)}" data-open-folder="${_esc(chipFolder)}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="16" y2="17"/><line x1="8" y1="9" x2="10" y2="9"/></svg><span class="email-attachment-open-label">${(window.__t || (k=>k))('email.open')}</span></span>`
       : '';
     return `<button type="button" class="email-attachment-chip${extraClass}" data-att-uid="${_esc(chipUid)}" data-att-index="${a.index}" data-att-name="${_esc(a.filename)}" data-att-folder="${_esc(chipFolder)}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 17.93 8.8l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg><span>${_esc(a.filename)}</span><span class="att-size">${Math.round((a.size||0)/1024)} KB</span>${openBtn}</button>`;
   };
@@ -5744,16 +5745,17 @@ function _buildAttsHtmlFor(uid, data) {
     ? '<div class="email-reader-atts">' + chips + '</div>'
     : '';
   const relatedSection = related.length
-    ? '<div class="email-reader-atts-hidden-note">From earlier in this thread</div><div class="email-reader-atts email-reader-atts-related">' + relatedChips + '</div>'
+    ? '<div class="email-reader-atts-hidden-note">' + (window.__t || (k=>k))('email.fromEarlierInThread') + '</div><div class="email-reader-atts email-reader-atts-related">' + relatedChips + '</div>'
     : '';
   const hiddenSection = hidden.length
-    ? '<div class="email-reader-atts-hidden-note">Filtered inline images / signature files</div><div class="email-reader-atts email-reader-atts-hidden">' + hiddenChips + '</div>'
+    ? '<div class="email-reader-atts-hidden-note">' + (window.__t || (k=>k))('email.filteredInlineImages') + '</div><div class="email-reader-atts email-reader-atts-hidden">' + hiddenChips + '</div>'
     : '';
+  const _t = (window.__t || (k=>k));
   const label = visible.length
-    ? `Attachments (${visible.length + related.length})`
+    ? _t('email.attachments').replace('{n}', String(visible.length + related.length))
     : related.length
-      ? `Thread attachments (${related.length})`
-      : `Hidden inline attachments (${hidden.length})`;
+      ? _t('email.threadAttachments').replace('{n}', String(related.length))
+      : _t('email.hiddenInlineAttachments').replace('{n}', String(hidden.length));
   const startCollapsed = !visible.length && !related.length;
   const downloadAllBtn = visible.length > 4
     ? `<button type="button" class="email-attachments-download-all" title="Download all attachments" data-att-uid="${_esc(uid)}" data-att-folder="${_esc(data.folder || state._libFolder || 'INBOX')}" data-att-count="${visible.length}"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg><span>All</span></button>`
@@ -5961,8 +5963,8 @@ async function _openEmailAsTab(em, folder) {
         <h4 style="display:flex;align-items:center;gap:6px;min-width:0;flex:1;">
           <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-left:8px;">${_esc(em.subject || '(no subject)')}</span>
         </h4>
-        <button class="minimize-btn" type="button" title="Minimize">_</button>
-        <button class="close-btn" type="button" title="Close">&#x2716;</button>
+        <button class="minimize-btn" type="button" title="${(window.__t || (k=>k))('email.minimize')}">_</button>
+        <button class="close-btn" type="button" title="${(window.__t || (k=>k))('common.close')}">&#x2716;</button>
       </div>
       <div class="modal-body email-reader-tab-body" style="display:flex;flex-direction:column;overflow:hidden;flex:1;min-height:0;padding:0;">
         <div class="email-card-reader email-card-expanded" style="flex:1;min-height:0;display:flex;flex-direction:column;">
@@ -6114,21 +6116,21 @@ async function _openEmailAsTab(em, folder) {
         <div class="email-reader-meta">
           <div class="email-reader-meta-row email-reader-meta-from">
             <strong>From:</strong>
-            <span class="recipient-chips">${fromChip}${(data.to || data.cc) ? `<button class="email-reader-meta-toggle" type="button" aria-expanded="false" title="Show recipients"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></button>` : ''}</span>
+            <span class="recipient-chips">${fromChip}${(data.to || data.cc) ? `<button class="email-reader-meta-toggle" type="button" aria-expanded="false" title="${(window.__t || (k=>k))('email.showRecipients')}"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></button>` : ''}</span>
           </div>
           ${(data.to || data.cc) ? `<div class="email-reader-meta-details" hidden>
             ${data.to ? `<div class="email-reader-meta-row"><strong>To:</strong><span class="recipient-chips">${buildChips(data.to)}</span></div>` : ''}
             ${data.cc ? `<div class="email-reader-meta-row"><strong>Cc:</strong><span class="recipient-chips">${buildChips(data.cc)}</span></div>` : ''}
           </div>` : ''}
           <div class="email-reader-actions-inline">
-            <button class="memory-toolbar-btn reader-icon-btn" data-act="ai-reply" title="${data.cached_ai_reply ? 'AI Reply (cached draft ready)' : 'AI Reply'}">${_aiReplyIcon(data)}<span class="reader-btn-label">AI reply</span></button>
-            <button class="memory-toolbar-btn reader-icon-btn" data-act="reply" title="Reply"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 17 4 12 9 7"/><path d="M20 18v-2a4 4 0 0 0-4-4H4"/></svg><span class="reader-btn-label">Reply</span></button>
-            ${_hasMultipleRecipients(data) ? `<button class="memory-toolbar-btn reader-icon-btn" data-act="reply-all" title="Reply All"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="7 17 2 12 7 7"/><polyline points="12 17 7 12 12 7"/><path d="M22 18v-2a4 4 0 0 0-4-4H7"/></svg><span class="reader-btn-label">Reply all</span></button>` : ''}
-            <button class="memory-toolbar-btn reader-icon-btn" data-act="forward" title="Forward"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 17 20 12 15 7"/><path d="M4 18v-2a4 4 0 0 1 4-4h12"/></svg><span class="reader-btn-label">Forward</span></button>
-            <button class="memory-toolbar-btn reader-icon-btn" data-act="summarize" title="Summarize">${_summaryIcon(data)}<span class="reader-btn-label">Summary</span></button>
-            <button class="memory-toolbar-btn reader-icon-btn" data-act="from-sender" title="Search text in this thread"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg><span class="reader-btn-label">Search</span></button>
+            <button class="memory-toolbar-btn reader-icon-btn" data-act="ai-reply" title="${(window.__t || (k=>k))('email.aiReply')}">${_aiReplyIcon(data)}<span class="reader-btn-label">${(window.__t || (k=>k))('email.aiReply')}</span></button>
+            <button class="memory-toolbar-btn reader-icon-btn" data-act="reply" title="${(window.__t || (k=>k))('email.reply')}"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 17 4 12 9 7"/><path d="M20 18v-2a4 4 0 0 0-4-4H4"/></svg><span class="reader-btn-label">${(window.__t || (k=>k))('email.reply')}</span></button>
+            ${_hasMultipleRecipients(data) ? `<button class="memory-toolbar-btn reader-icon-btn" data-act="reply-all" title="${(window.__t || (k=>k))('email.replyAll')}"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="7 17 2 12 7 7"/><polyline points="12 17 7 12 12 7"/><path d="M22 18v-2a4 4 0 0 0-4-4H7"/></svg><span class="reader-btn-label">${(window.__t || (k=>k))('email.replyAll')}</span></button>` : ''}
+            <button class="memory-toolbar-btn reader-icon-btn" data-act="forward" title="${(window.__t || (k=>k))('email.forward')}"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 17 20 12 15 7"/><path d="M4 18v-2a4 4 0 0 1 4-4h12"/></svg><span class="reader-btn-label">${(window.__t || (k=>k))('email.forward')}</span></button>
+            <button class="memory-toolbar-btn reader-icon-btn" data-act="summarize" title="${(window.__t || (k=>k))('email.summary')}">${_summaryIcon(data)}<span class="reader-btn-label">${(window.__t || (k=>k))('email.summary')}</span></button>
+            <button class="memory-toolbar-btn reader-icon-btn" data-act="from-sender" title="${(window.__t || (k=>k))('email.search')}"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg><span class="reader-btn-label">${(window.__t || (k=>k))('email.search')}</span></button>
             <div class="email-reader-more-wrap" style="position:relative">
-              <button class="memory-toolbar-btn reader-icon-btn" data-act="more" title="More actions"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg><span class="reader-btn-label">More</span></button>
+              <button class="memory-toolbar-btn reader-icon-btn" data-act="more" title="${(window.__t || (k=>k))('email.moreActions')}"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg><span class="reader-btn-label">${(window.__t || (k=>k))('email.more')}</span></button>
             </div>
           </div>
         </div>
@@ -6173,7 +6175,7 @@ async function _openEmailAsTab(em, folder) {
       try { _showReaderMoreMenu(em, modal, reader, ev.currentTarget); } catch {}
     });
   } catch (err) {
-    reader.innerHTML = `<div style="padding:20px;color:var(--red,#e55)">Failed to load: ${_esc(String(err))}</div>`;
+    reader.innerHTML = `<div style="padding:20px;color:var(--red,#e55)">${(window.__t || (k=>k))('common.loading')}… ${_esc(String(err))}</div>`;
   }
 }
 
@@ -6199,7 +6201,7 @@ async function _openEmailWindow(em, folder) {
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/></svg>
           <span class="email-window-subject" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${_esc(em.subject || '(no subject)')}</span>
         </h4>
-        <button class="close-btn" type="button" title="Close">&#x2716;</button>
+        <button class="close-btn" type="button" title="${(window.__t || (k=>k))('common.close')}">&#x2716;</button>
       </div>
       <div class="modal-body email-window-body" style="overflow:auto;padding:14px 16px;flex:1;min-height:0;">
         <div class="email-window-loading" style="display:flex;justify-content:center;padding:24px;"></div>
@@ -6275,20 +6277,20 @@ async function _openEmailWindow(em, folder) {
         <div class="email-reader-meta">
           <div class="email-reader-meta-row email-reader-meta-from">
             <strong>From:</strong>
-            <span class="recipient-chips">${fromChip}${(data.to || data.cc) ? `<button class="email-reader-meta-toggle" type="button" aria-expanded="false" title="Show recipients"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></button>` : ''}</span>
+            <span class="recipient-chips">${fromChip}${(data.to || data.cc) ? `<button class="email-reader-meta-toggle" type="button" aria-expanded="false" title="${(window.__t || (k=>k))('email.showRecipients')}"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></button>` : ''}</span>
           </div>
           ${(data.to || data.cc) ? `<div class="email-reader-meta-details" hidden>
             ${data.to ? `<div class="email-reader-meta-row"><strong>To:</strong><span class="recipient-chips">${_chipsFor(data.to)}</span></div>` : ''}
             ${data.cc ? `<div class="email-reader-meta-row"><strong>Cc:</strong><span class="recipient-chips">${_chipsFor(data.cc)}</span></div>` : ''}
           </div>` : ''}
           <div class="email-reader-actions-inline">
-            <button class="memory-toolbar-btn reader-icon-btn" data-act="ai-reply" title="${data.cached_ai_reply ? 'AI Reply (cached draft ready)' : 'AI Reply (suggest a draft)'}">${_aiReplyIcon(data)}<span class="reader-btn-label">AI reply</span></button>
-            <button class="memory-toolbar-btn reader-icon-btn" data-act="reply" title="Reply"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 17 4 12 9 7"/><path d="M20 18v-2a4 4 0 0 0-4-4H4"/></svg><span class="reader-btn-label">Reply</span></button>
-            ${_hasMultipleRecipients(data) ? `<button class="memory-toolbar-btn reader-icon-btn" data-act="reply-all" title="Reply All"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="7 17 2 12 7 7"/><polyline points="12 17 7 12 12 7"/><path d="M22 18v-2a4 4 0 0 0-4-4H7"/></svg><span class="reader-btn-label">Reply all</span></button>` : ''}
-            <button class="memory-toolbar-btn reader-icon-btn" data-act="forward" title="Forward"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 17 20 12 15 7"/><path d="M4 18v-2a4 4 0 0 1 4-4h12"/></svg><span class="reader-btn-label">Forward</span></button>
-            <button class="memory-toolbar-btn reader-icon-btn" data-act="summarize" title="Summarize">${_summaryIcon(data)}<span class="reader-btn-label">Summary</span></button>
+            <button class="memory-toolbar-btn reader-icon-btn" data-act="ai-reply" title="${(window.__t || (k=>k))('email.aiReply')}">${_aiReplyIcon(data)}<span class="reader-btn-label">${(window.__t || (k=>k))('email.aiReply')}</span></button>
+            <button class="memory-toolbar-btn reader-icon-btn" data-act="reply" title="${(window.__t || (k=>k))('email.reply')}"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 17 4 12 9 7"/><path d="M20 18v-2a4 4 0 0 0-4-4H4"/></svg><span class="reader-btn-label">${(window.__t || (k=>k))('email.reply')}</span></button>
+            ${_hasMultipleRecipients(data) ? `<button class="memory-toolbar-btn reader-icon-btn" data-act="reply-all" title="${(window.__t || (k=>k))('email.replyAll')}"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="7 17 2 12 7 7"/><polyline points="12 17 7 12 12 7"/><path d="M22 18v-2a4 4 0 0 0-4-4H7"/></svg><span class="reader-btn-label">${(window.__t || (k=>k))('email.replyAll')}</span></button>` : ''}
+            <button class="memory-toolbar-btn reader-icon-btn" data-act="forward" title="${(window.__t || (k=>k))('email.forward')}"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 17 20 12 15 7"/><path d="M4 18v-2a4 4 0 0 1 4-4h12"/></svg><span class="reader-btn-label">${(window.__t || (k=>k))('email.forward')}</span></button>
+            <button class="memory-toolbar-btn reader-icon-btn" data-act="summarize" title="${(window.__t || (k=>k))('email.summary')}">${_summaryIcon(data)}<span class="reader-btn-label">${(window.__t || (k=>k))('email.summary')}</span></button>
             <div class="email-reader-more-wrap" style="position:relative">
-              <button class="memory-toolbar-btn reader-icon-btn" data-act="more" title="More actions"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg><span class="reader-btn-label">More</span></button>
+              <button class="memory-toolbar-btn reader-icon-btn" data-act="more" title="${(window.__t || (k=>k))('email.moreActions')}"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg><span class="reader-btn-label">${(window.__t || (k=>k))('email.more')}</span></button>
             </div>
           </div>
         </div>
@@ -6337,7 +6339,7 @@ async function _openEmailWindow(em, folder) {
       try { _showReaderMoreMenu(em, modal, bodyEl, ev.currentTarget); } catch {}
     });
   } catch (err) {
-    bodyEl.innerHTML = `<div style="color:var(--red,#e55);padding:16px;">Failed to load: ${_esc(String(err))}</div>`;
+    bodyEl.innerHTML = `<div style="color:var(--red,#e55);padding:16px;">${(window.__t || (k=>k))('common.loading')}… ${_esc(String(err))}</div>`;
   }
 }
 
@@ -6427,13 +6429,13 @@ async function _summarizeEmail(reader, data, btn) {
       existing.style.display = '';
       if (btn) {
         btn.classList.add('active');
-        btn.querySelector('.btn-label').textContent = 'Summary';
+        btn.querySelector('.btn-label').textContent = (window.__t || (k=>k))('email.summary');
       }
     } else {
       existing.style.display = 'none';
       if (btn) {
         btn.classList.remove('active');
-        btn.querySelector('.btn-label').textContent = 'Summary';
+        btn.querySelector('.btn-label').textContent = (window.__t || (k=>k))('email.summary');
       }
     }
     return;
@@ -6448,14 +6450,14 @@ async function _summarizeEmail(reader, data, btn) {
     prompt.innerHTML = `
       <div class="email-summary-header">
         <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0L14.59 8.41L23 12L14.59 15.59L12 24L9.41 15.59L1 12L9.41 8.41Z"/></svg>
-        <span>Summary</span>
+        <span>${(window.__t || (k=>k))('email.summary')}</span>
       </div>
-      <div class="email-summary-content" style="white-space:normal;display:flex;align-items:center;flex-wrap:wrap;gap:6px;"><span style="opacity:0.65">No AI summary generated.</span><button class="memory-toolbar-btn" data-act="summary-generate" style="font-size:10px;margin-left:auto;">Generate now</button></div>`;
+      <div class="email-summary-content" style="white-space:normal;display:flex;align-items:center;flex-wrap:wrap;gap:6px;"><span style="opacity:0.65">${(window.__t || (k=>k))('email.noAIsummaryGenerated')}</span><button class="memory-toolbar-btn" data-act="summary-generate" style="font-size:10px;margin-left:auto;">${(window.__t || (k=>k))('email.generateNow')}</button></div>`;
     body.insertBefore(prompt, body.firstChild);
     if (btn) {
       btn.classList.add('active');
       const label = btn.querySelector('.btn-label');
-      if (label) label.textContent = 'Summary';
+      if (label) label.textContent = (window.__t || (k=>k))('email.summary');
     }
     // No Cancel button — toggling the Summary button again hides this panel
     // (handled by the existing-panel branch above), so it'd be redundant.
@@ -6480,7 +6482,7 @@ async function _generateSummary(reader, data, btn) {
   panel.innerHTML =
     '<div class="email-summary-header email-summary-toggle" role="button" tabindex="0">'
     +   '<svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0L14.59 8.41L23 12L14.59 15.59L12 24L9.41 15.59L1 12L9.41 8.41Z"/></svg>'
-    +   '<span>Summary</span>'
+    +   '<span>' + (window.__t || (k=>k))('email.summary') + '</span>'
     +   '<svg class="email-summary-chevron" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-left:auto;transition:transform .15s ease;"><polyline points="6 9 12 15 18 9"/></svg>'
     + '</div>'
     + '<div class="email-summary-content"></div>';
@@ -6527,16 +6529,16 @@ async function _generateSummary(reader, data, btn) {
       if (btn) {
         btn.classList.add('active');
         const label = btn.querySelector('.btn-label');
-        if (label) label.textContent = 'Summary';
+        if (label) label.textContent = (window.__t || (k=>k))('email.summary');
       }
     } else {
-      content.innerHTML = `<span style="color:var(--red)">${_esc(result.error || 'Failed to summarize')}</span>`;
+      content.innerHTML = `<span style="color:var(--red)">${_esc(result.error || (window.__t || (k=>k))('email.failedToSummarize'))}</span>`;
       panel.remove();
     }
   } catch (e) {
     sp.destroy();
     panel.remove();
-    if (uiModule) uiModule.showError?.('Failed to summarize');
+    if (uiModule) uiModule.showError?.((window.__t || (k=>k))('email.failedToSummarize'));
   } finally {
     if (btn) btn.disabled = false;
   }
@@ -6718,7 +6720,7 @@ function _showReaderMoreMenu(em, card, reader, anchor) {
   //   3. Move to Spam / Move to Trash / Delete — destructive
   const actions = [
     {
-      label: 'Open in new tab',
+      label: (window.__t || (k=>k))('email.openInNewTab'),
       icon: _newTabIcon,
       action: async () => {
         const folder = state._libFolder || 'INBOX';
@@ -6726,7 +6728,7 @@ function _showReaderMoreMenu(em, card, reader, anchor) {
       },
     },
     {
-      label: 'Remind to reply',
+      label: (window.__t || (k=>k))('email.remindMe'),
       icon: _bellIcon,
       submenu: 'remind',
     },
@@ -6737,7 +6739,7 @@ function _showReaderMoreMenu(em, card, reader, anchor) {
     },
     { separator: true },
     {
-      label: em.is_read ? 'Mark as Unread' : 'Mark as Read',
+      label: em.is_read ? (window.__t || (k=>k))('email.markAsUnread') : (window.__t || (k=>k))('email.markAsRead'),
       icon: _unreadIcon,
       action: async () => {
         const newRead = !em.is_read;
@@ -6757,7 +6759,7 @@ function _showReaderMoreMenu(em, card, reader, anchor) {
       // sidebar-pin / favorites filter so the visual language stays
       // consistent. Toggling updates em.is_flagged and re-sorts via
       // _renderGrid (favorited rows are always pinned at the top).
-      label: em.is_flagged ? 'Unfavorite' : 'Favorite (pin to top)',
+      label: em.is_flagged ? (window.__t || (k=>k))('email.unfavorite') : (window.__t || (k=>k))('email.favorite'),
       icon: '<svg width="14" height="14" viewBox="0 0 24 24" fill="' + (em.is_flagged ? 'currentColor' : 'none') + '" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>',
       action: async () => {
         const next = !em.is_flagged;
@@ -6774,7 +6776,7 @@ function _showReaderMoreMenu(em, card, reader, anchor) {
       },
     },
     {
-      label: em.is_answered ? 'Mark as Not Done' : 'Mark as Done',
+      label: em.is_answered ? (window.__t || (k=>k))('email.markAsNotDone') : (window.__t || (k=>k))('email.markAsDone'),
       icon: _checkIcon,
       action: async () => {
         const newState = !em.is_answered;
@@ -6795,7 +6797,7 @@ function _showReaderMoreMenu(em, card, reader, anchor) {
       },
     },
     {
-      label: 'Move to Archive',
+      label: (window.__t || (k=>k))('email.moveToArchive'),
       icon: _archIcon,
       action: async () => {
         try {
@@ -6807,7 +6809,7 @@ function _showReaderMoreMenu(em, card, reader, anchor) {
     {
       // Save the sender to CardDAV contacts. Pulls name + address off the
       // list-item (em); falls back to splitting the local-part for a name.
-      label: 'Save sender to contacts',
+      label: (window.__t || (k=>k))('email.saveSenderToContacts'),
       icon: _contactIcon,
       action: async () => {
         const email = (em.from_address || em.from || '').trim();
@@ -6826,7 +6828,7 @@ function _showReaderMoreMenu(em, card, reader, anchor) {
           import('./ui.js').then(m => {
             if (!m.showToast) return;
             if (d.success && d.message === 'Already exists') m.showToast('Already in contacts');
-            else if (d.success) m.showToast('Saved to contacts');
+            else if (d.success) m.showToast((window.__t || (k=>k))('settings.saved'));
             else m.showError && m.showError('Failed to save contact');
           }).catch(() => {});
         } catch (_) {
@@ -6836,7 +6838,7 @@ function _showReaderMoreMenu(em, card, reader, anchor) {
     },
     { separator: true },
     {
-      label: 'Move to Spam',
+      label: (window.__t || (k=>k))('email.moveToSpam'),
       icon: _spamIcon,
       action: async () => {
         try {
@@ -6846,7 +6848,7 @@ function _showReaderMoreMenu(em, card, reader, anchor) {
       },
     },
     {
-      label: 'Move to Trash',
+      label: (window.__t || (k=>k))('email.moveToTrash'),
       icon: _trashIcon,
       action: async () => {
         const busy = _showEmailDeleteOverlay(card);
@@ -6864,14 +6866,14 @@ function _showReaderMoreMenu(em, card, reader, anchor) {
       },
     },
     {
-      label: 'Delete Permanently',
+      label: (window.__t || (k=>k))('email.deletePermanently'),
       icon: _deleteForeverIcon,
       danger: true,
       action: async () => {
         const subject = em.subject || '(no subject)';
         const ok = await styledConfirm(
           `Permanently delete "${subject}"? This cannot be undone.`,
-          { confirmText: 'Delete', cancelText: 'Cancel', danger: true }
+          { confirmText: (window.__t || (k=>k))('email.delete'), cancelText: (window.__t || (k=>k))('common.cancel'), danger: true }
         );
         if (!ok) return;
         const busy = _showEmailDeleteOverlay(card);
@@ -6921,19 +6923,19 @@ function _showReaderMoreMenu(em, card, reader, anchor) {
   const _cancelIco = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
   const cancelItem = document.createElement('div');
   cancelItem.className = 'dropdown-item-compact dropdown-cancel-mobile';
-  cancelItem.innerHTML = _icon(_cancelIco) + '<span>Cancel</span>';
-  cancelItem.addEventListener('click', (e) => {
-    e.stopPropagation();
-    close();
-  });
-  dropdown.appendChild(cancelItem);
+    cancelItem.innerHTML = _icon(_cancelIco) + '<span>' + (window.__t || (k=>k))('common.cancel') + '</span>';
+    cancelItem.addEventListener('click', (e) => {
+      e.stopPropagation();
+      close();
+    });
+    dropdown.appendChild(cancelItem);
 
-  document.body.appendChild(dropdown);
-  _fitEmailDropdown(dropdown, rect);
-  const close = bindMenuDismiss(dropdown, () => {
-    dropdown.remove();
-    anchor.classList.remove('reader-more-active');
-  }, (ev) => !dropdown.contains(ev.target) && ev.target !== anchor);
+    document.body.appendChild(dropdown);
+    _fitEmailDropdown(dropdown, rect);
+    const close = bindMenuDismiss(dropdown, () => {
+      dropdown.remove();
+      anchor.classList.remove('reader-more-active');
+    }, (ev) => !dropdown.contains(ev.target) && ev.target !== anchor);
 }
 
 function _showCardMenu(em, anchor) {
@@ -6956,21 +6958,18 @@ function _showCardMenu(em, anchor) {
 
   const _newTabIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>';
   const actions = [
-    { label: 'Open', icon: _replyIcon, action: async () => {
+    { label: (window.__t || (k=>k))('email.open'), icon: _replyIcon, action: async () => {
       // Just expand inline (same as tapping the row).
       const card = anchor.closest('.doclib-card');
       if (card && !card.classList.contains('doclib-card-expanded')) {
         await _toggleCardPreview(card, em);
       }
     }},
-    { label: 'Open in new tab', icon: _newTabIcon, action: async () => {
-      // Open this email as its own in-app modal that registers a dock
-      // chip — multiple emails can be opened simultaneously, each gets
-      // its own chip in the minimized dock.
+    { label: (window.__t || (k=>k))('email.openInNewTab'), icon: _newTabIcon, action: async () => {
       const folder = state._libFolder || 'INBOX';
       await _openEmailAsTab(em, folder);
     }},
-    { label: 'Remind to reply', icon: _cardBellIcon, submenu: 'remind' },
+    { label: (window.__t || (k=>k))('email.remindMe'), icon: _cardBellIcon, submenu: 'remind' },
   ];
 
   if (!isSentFolder) {
@@ -6981,7 +6980,7 @@ function _showCardMenu(em, anchor) {
     const _checkForLabel = _cardForLabel ? _cardForLabel.querySelector('.email-card-done') : null;
     const _currentlyDone = _checkForLabel ? _checkForLabel.classList.contains('active') : !!em.is_answered;
     actions.push({
-      label: _currentlyDone ? 'Not Done' : 'Done',
+      label: _currentlyDone ? (window.__t || (k=>k))('email.notDone') : (window.__t || (k=>k))('email.done'),
       icon: _checkIcon,
       action: async () => {
         const card = anchor.closest('.doclib-card');
@@ -7011,7 +7010,7 @@ function _showCardMenu(em, anchor) {
       },
     });
     actions.push({
-      label: em.is_flagged ? 'Unfavorite' : 'Favorite (pin to top)',
+      label: em.is_flagged ? (window.__t || (k=>k))('email.unfavorite') : (window.__t || (k=>k))('email.favorite'),
       icon: '<svg width="14" height="14" viewBox="0 0 24 24" fill="' + (em.is_flagged ? 'currentColor' : 'none') + '" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>',
       action: async () => {
         const next = !em.is_flagged;
@@ -7027,7 +7026,7 @@ function _showCardMenu(em, anchor) {
       },
     });
     actions.push({
-      label: 'Archive',
+      label: (window.__t || (k=>k))('email.moveToArchive'),
       icon: _archIcon,
       action: async () => {
         await fetch(`${API_BASE}/api/email/archive/${em.uid}?folder=${encodeURIComponent(state._libFolder)}${_acct()}`, { method: 'POST' });
@@ -7039,7 +7038,7 @@ function _showCardMenu(em, anchor) {
     });
   } else {
     actions.push({
-      label: em.is_flagged ? 'Unfavorite' : 'Favorite (pin to top)',
+      label: em.is_flagged ? (window.__t || (k=>k))('email.unfavorite') : (window.__t || (k=>k))('email.favorite'),
       icon: '<svg width="14" height="14" viewBox="0 0 24 24" fill="' + (em.is_flagged ? 'currentColor' : 'none') + '" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>',
       action: async () => {
         const next = !em.is_flagged;
@@ -7055,7 +7054,7 @@ function _showCardMenu(em, anchor) {
       },
     });
     actions.push({
-      label: 'Archive',
+      label: (window.__t || (k=>k))('email.moveToArchive'),
       icon: _archIcon,
       action: async () => {
         await fetch(`${API_BASE}/api/email/archive/${em.uid}?folder=${encodeURIComponent(state._libFolder)}${_acct()}`, { method: 'POST' });
@@ -7074,7 +7073,7 @@ function _showCardMenu(em, anchor) {
   // center lines up with the SVG icons above (which sit a bit higher).
   const _selectIcon = '<span style="font-size:16px;line-height:1;position:relative;top:-2px;">●</span>';
   actions.push({
-    label: 'Select',
+    label: (window.__t || (k=>k))('email.select'),
     icon: _selectIcon,
     action: () => {
       state._selectMode = true;
@@ -7084,10 +7083,10 @@ function _showCardMenu(em, anchor) {
     },
   });
 
-  actions.push(
-    { label: 'Delete', icon: _delIcon, danger: true, action: async () => {
-      const subject = em.subject || '(no subject)';
-      const ok = await styledConfirm(`Delete "${subject}"?`, { confirmText: 'Delete', cancelText: 'Cancel', danger: true });
+    actions.push(
+      { label: (window.__t || (k=>k))('common.delete'), icon: _delIcon, danger: true, action: async () => {
+        const subject = em.subject || '(no subject)';
+        const ok = await styledConfirm(`Delete "${subject}"?`, { confirmText: (window.__t || (k=>k))('email.delete'), cancelText: (window.__t || (k=>k))('common.cancel'), danger: true });
       if (!ok) return;
       const card = document.querySelector(`#email-lib-grid .doclib-card[data-uid="${CSS.escape(String(em.uid))}"]`);
       const busy = _showEmailDeleteOverlay(card);
@@ -7128,19 +7127,19 @@ function _showCardMenu(em, anchor) {
   const _cancelIco = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
   const cancelItem = document.createElement('div');
   cancelItem.className = 'dropdown-item-compact dropdown-cancel-mobile';
-  cancelItem.innerHTML = _icon(_cancelIco) + '<span>Cancel</span>';
-  cancelItem.addEventListener('click', (e) => {
-    e.stopPropagation();
-    close();
-  });
-  dropdown.appendChild(cancelItem);
+    cancelItem.innerHTML = _icon(_cancelIco) + '<span>' + (window.__t || (k=>k))('common.cancel') + '</span>';
+    cancelItem.addEventListener('click', (e) => {
+      e.stopPropagation();
+      close();
+    });
+    dropdown.appendChild(cancelItem);
 
-  document.body.appendChild(dropdown);
-  _fitEmailDropdown(dropdown, rect);
-  const close = bindMenuDismiss(dropdown, () => {
-    dropdown.remove();
-    anchor.classList.remove('reader-more-active');
-  }, (ev) => !dropdown.contains(ev.target) && ev.target !== anchor);
+    document.body.appendChild(dropdown);
+    _fitEmailDropdown(dropdown, rect);
+    const close = bindMenuDismiss(dropdown, () => {
+      dropdown.remove();
+      anchor.classList.remove('reader-more-active');
+    }, (ev) => !dropdown.contains(ev.target) && ev.target !== anchor);
 }
 
 // Bulk "Actions" dropdown for select mode — Delete is a separate visible button.
@@ -7169,7 +7168,7 @@ function _showBulkActionsMenu(anchor) {
   const _cancelIco2 = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
   const cancelIt = document.createElement('div');
   cancelIt.className = 'dropdown-item-compact dropdown-cancel-mobile';
-  cancelIt.innerHTML = `<span class="dropdown-icon">${_cancelIco2}</span><span>Cancel</span>`;
+  cancelIt.innerHTML = `<span class="dropdown-icon">${_cancelIco2}</span><span>${(window.__t || (k=>k))('common.cancel')}</span>`;
   cancelIt.addEventListener('click', (e) => {
     e.stopPropagation();
     close();
@@ -7193,11 +7192,11 @@ function _updateBulkBar() {
   const selectBtn = document.getElementById('email-lib-select-btn');
   if (bar) bar.classList.toggle('hidden', !state._selectMode);
   if (selectBtn) {
-    selectBtn.textContent = state._selectMode ? 'Cancel' : 'Select';
+    selectBtn.textContent = state._selectMode ? (window.__t || (k=>k))('common.cancel') : (window.__t || (k=>k))('email.select');
     selectBtn.classList.toggle('active', state._selectMode);
   }
   const count = document.getElementById('email-lib-selected-count');
-  if (count) count.textContent = `${state._selectedUids.size} Selected`;
+  if (count) count.textContent = (window.__t || (k=>k))('email.selected', {n: state._selectedUids.size});
   const all = document.getElementById('email-lib-select-all');
   if (all) all.checked = state._libEmails.length > 0 && state._libEmails.every(e => state._selectedUids.has(e.uid));
   // When something's selected, brighten Actions to the same full --fg color as
@@ -7215,7 +7214,7 @@ async function _bulkAction(action) {
   if (action === 'delete') {
     const ok = await styledConfirm(
       `Delete ${uids.length} selected email${uids.length === 1 ? '' : 's'}?`,
-      { confirmText: 'Delete', cancelText: 'Cancel', danger: true },
+      { confirmText: (window.__t || (k=>k))('email.delete'), cancelText: (window.__t || (k=>k))('common.cancel'), danger: true },
     );
     if (!ok) return;
   }
@@ -7618,7 +7617,7 @@ function _showLibRemindSubmenu(em, parentDropdown) {
   const header = document.createElement('div');
   header.className = 'dropdown-item-compact';
   header.style.cssText = 'opacity:0.5;font-size:10px;pointer-events:none;text-transform:uppercase;letter-spacing:0.5px;padding-top:6px;';
-  header.innerHTML = '<span>Remind me</span>';
+  header.innerHTML = '<span>' + ((window.__t || (k=>k))('email.remindMe')) + '</span>';
   parentDropdown.appendChild(header);
 
   const now = new Date();
@@ -7648,7 +7647,7 @@ function _showLibRemindSubmenu(em, parentDropdown) {
   }
   const customItem = document.createElement('div');
   customItem.className = 'dropdown-item-compact';
-  customItem.innerHTML = '<span>Pick date and time…</span>';
+  customItem.innerHTML = '<span>' + ((window.__t || (k=>k))('email.pickDateTime')) + '</span>';
   customItem.addEventListener('click', (e) => {
     e.stopPropagation();
     parentDropdown.remove();
@@ -7672,7 +7671,7 @@ function _showLibRemindSubmenu(em, parentDropdown) {
   // due_date, so no timer/reminder fires.
   const noteItem = document.createElement('div');
   noteItem.className = 'dropdown-item-compact';
-  noteItem.innerHTML = '<span>Note</span>';
+  noteItem.innerHTML = '<span>' + ((window.__t || (k=>k))('email.note')) + '</span>';
   noteItem.addEventListener('click', (e) => {
     e.stopPropagation();
     parentDropdown.remove();
@@ -7691,8 +7690,8 @@ function _promptEmailNote(em) {
     <div style="font-size:11px;opacity:0.6;">Note about ${_esc(subject)}</div>
     <textarea data-note placeholder="Write your note…" rows="4" style="resize:vertical;min-height:80px;font-family:inherit;font-size:12px;padding:7px 8px;border-radius:6px;border:1px solid var(--border);background:var(--bg-elev,#1a1a1a);color:var(--fg);box-sizing:border-box;width:100%;"></textarea>
     <div style="display:flex;gap:6px;justify-content:flex-end;">
-      <button class="memory-toolbar-btn" data-act="cancel">Cancel</button>
-      <button class="memory-toolbar-btn active" data-act="save">Save</button>
+      <button class="memory-toolbar-btn" data-act="cancel">${(window.__t || (k=>k))('common.cancel')}</button>
+      <button class="memory-toolbar-btn active" data-act="save">${(window.__t || (k=>k))('common.save')}</button>
     </div>
   `;
   overlay.appendChild(card);
@@ -7757,7 +7756,7 @@ async function _createEmailReplyReminder(em, dueDate, customText = '') {
       const fmt = dueDate.toLocaleString([], { month:'short', day:'numeric', hour:'numeric', minute:'2-digit' });
       showToast(`Todo reminder set for ${fmt}`);
     } else {
-      showToast('Reply note saved');
+      showToast((window.__t || (k=>k))('email.replyNoteSaved'));
     }
     if ('Notification' in window && Notification.permission === 'default') {
       try { Notification.requestPermission(); } catch {}

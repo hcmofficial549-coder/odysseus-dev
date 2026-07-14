@@ -645,7 +645,7 @@ function _selectedServeTarget(panel) {
     env: server?.env || '',
     port: host ? (server?.port || _getPort(host) || '') : '',
     venv,
-    platform: host ? (server?.platform || '') : (_envState.hostPlatform || ''),
+    platform: server?.platform || _envState.platform || '',
     label,
   };
 }
@@ -777,12 +777,6 @@ function _selectedGgufSizeGb(model, relPath) {
   return bytes / (1024 ** 3);
 }
 
-function _projectorGgufFiles(model) {
-  return _ggufFilesForModel(model)
-    .filter(f => (f.role || '') === 'projector' || /(^|\/)mmproj[^/]*\.gguf$/i.test(f.rel_path || f.name || ''))
-    .sort((a, b) => String(a.rel_path || a.name || '').localeCompare(String(b.rel_path || b.name || '')));
-}
-
 function _ggufFileLabel(file) {
   const base = (file.name || file.rel_path || '').split('/').pop();
   const size = _formatGgufSize(file.size_bytes);
@@ -855,7 +849,7 @@ function _ggufDeleteChoice(repo, files) {
     const selectedBtn = overlay.querySelector('#cookbook-gguf-delete-selected');
     const prevFocus = document.activeElement;
 
-    msg.textContent = `${repo} has multiple GGUF files. Pick what to delete.`;
+    msg.textContent = (window.__t || (k=>k))('cookbook.multipleGguf', {repo});
     list.innerHTML = safeFiles.map((file, idx) => {
       const label = esc ? esc(_ggufFileLabel(file)) : _ggufFileLabel(file);
       const rel = esc ? esc(file.rel_path) : file.rel_path;
@@ -884,7 +878,7 @@ function _ggufDeleteChoice(repo, files) {
         .map(input => safeFiles[Number(input.value)])
         .filter(Boolean);
       if (!selected.length) {
-        uiModule.showToast?.('Select at least one GGUF file.');
+        uiModule.showToast?.((window.__t || (k=>k))('cookbook.selectAtLeastOne'));
         return;
       }
       cleanup({ mode: 'files', files: selected });
@@ -989,10 +983,10 @@ function _rerenderCachedModels() {
     html += `<div style="flex:1;min-width:0;">`;
     const _mc = modelColor(m.repo_id) || '';
     const _runningPill = _isActivelyServing(m.repo_id)
-      ? ` <span class="cookbook-serve-running-pill is-clickable" title="This model is currently being served — click to open in Running" data-repo="${esc(m.repo_id)}" role="button" tabindex="0">running</span>`
+      ? ` <span class="cookbook-serve-running-pill is-clickable" title="${(window.__t || (k=>k))('cookbook.serverRunning')}" data-repo="${esc(m.repo_id)}" role="button" tabindex="0">${(window.__t || (k=>k))('cookbook.serverRunning')}</span>`
       : '';
     const _downloadingPill = _isDownloading
-      ? ` <span class="cookbook-serve-downloading-pill${_isDlActive ? '' : ' is-stalled'}" title="${_isDlActive ? 'Download in progress' : 'Download stalled — retry to resume'}">${_isDlActive ? 'downloading' : 'stalled'}</span>`
+      ? ` <span class="cookbook-serve-downloading-pill${_isDlActive ? '' : ' is-stalled'}" title="${_isDlActive ? (window.__t || (k=>k))('cookbook.downloading', {progress: ''}).trim() : (window.__t || (k=>k))('cookbook.stalled', {mins: '?'}).trim()}">${_isDlActive ? (window.__t || (k=>k))('cookbook.downloading', {progress: ''}).trim() : (window.__t || (k=>k))('cookbook.stalled', {mins: '?'}).trim()}</span>`
       : '';
     const _favoritePill = _isFavorite ? ' <span class="memory-cat-badge memory-cat-pinned cookbook-serve-fav-badge">pinned</span>' : '';
     html += `<div class="memory-item-title cookbook-serve-title"${_mc ? ` style="color:${_mc}"` : ''}><span class="cookbook-serve-title-name">${modelLogo(m.repo_id)}${esc(shortName)}</span>${_favoritePill}${hfLink ? ` <a href="${esc(hfLink)}" target="_blank" rel="noopener" class="cookbook-hf-link">HF ↗</a>` : ''}${_runningPill}${_downloadingPill}</div>`;
@@ -1006,7 +1000,7 @@ function _rerenderCachedModels() {
     html += `<div class="memory-item-actions"><button type="button" class="memory-item-btn hwfit-cached-menu-btn" title="Actions" aria-label="Model actions"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg></button></div>`;
     html += `</div>`;
   }
-  if (!visibleCount) html += '<div class="hwfit-loading">No matching models</div>';
+  if (!visibleCount) html += '<div class="hwfit-loading">' + ((window.__t || (k=>k))('cookbook.noMatchingModels')) + '</div>';
   list.innerHTML = html;
 
   // Wire tag chips
@@ -1083,12 +1077,12 @@ function _rerenderCachedModels() {
         ? '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>'
         : '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>';
       const items = [];
-      items.push({ label: _favNow ? 'Unfavorite' : 'Favorite', icon: _favIco, action: 'favorite' });
+      items.push({ label: _favNow ? (window.__t || (k=>k))('cookbook.unfavorited') : (window.__t || (k=>k))('cookbook.favorited'), icon: _favIco, action: 'favorite' });
       if (m && m.status === 'ready') items.push({ label: 'Serve', icon: _serveIco, action: 'serve' });
       if (m && m.status === 'downloading') items.push({ label: 'Retry', icon: _retryIco, action: 'retry' });
       if (m && m.status === 'ready') items.push({ label: 'Schedule…', icon: _schedIco, action: 'schedule' });
       items.push({ label: 'Select', icon: _selectIco, action: 'select' });
-      items.push({ label: 'Delete', icon: _deleteIco, action: 'delete', danger: true });
+      items.push({ label: (window.__t || (k=>k))('common.delete'), icon: _deleteIco, action: 'delete', danger: true });
       for (const opt of items) {
         const div = document.createElement('div');
         div.className = 'dropdown-item-compact' + (opt.danger ? ' dropdown-item-danger' : '');
@@ -1098,7 +1092,7 @@ function _rerenderCachedModels() {
           if (opt.action === 'serve') item.click();
           else if (opt.action === 'favorite') {
             const favored = _toggleServeFavorite(repo);
-            uiModule.showToast(favored ? 'Favorited — pinned to top' : 'Unfavorited');
+            uiModule.showToast(favored ? (window.__t || (k=>k))('cookbook.favorited') : (window.__t || (k=>k))('cookbook.unfavorited'));
             _rerenderCachedModels();
           }
           else if (opt.action === 'delete') _deleteCachedModel(repo, item, false, m);
@@ -1141,7 +1135,7 @@ function _rerenderCachedModels() {
       const _cancelIco = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
       const cancelDiv = document.createElement('div');
       cancelDiv.className = 'dropdown-item-compact dropdown-cancel-mobile';
-      cancelDiv.innerHTML = _di(_cancelIco) + '<span>Cancel</span>';
+      cancelDiv.innerHTML = _di(_cancelIco) + '<span>' + ((window.__t || (k=>k))('common.cancel')) + '</span>';
       cancelDiv.addEventListener('click', () => { closeDropdown(); });
       dropdown.appendChild(cancelDiv);
       const rect = btn.getBoundingClientRect();
@@ -1180,7 +1174,7 @@ function _rerenderCachedModels() {
       if (!m) return;
       if (m.status !== 'ready') {
         if (m.status === 'downloading' && !_isActivelyDownloading(m.repo_id)) {
-          uiModule.showToast?.('Refreshing cached model status…');
+          uiModule.showToast?.(_t('cookbook.serve.refreshingModelStatus'));
           _fetchCachedModels(true);
         }
         return;
@@ -1268,7 +1262,8 @@ function _rerenderCachedModels() {
       const _kvAutoDefault = (_kvOptsCheck && _kvOptsCheck.kvCacheDtype) || (_isMiniMaxMSeries ? 'fp8' : 'auto');
       const _kvSelected = sv('vllm_kv_cache_dtype', _kvAutoDefault);
       const vllmKvCacheOpts = ['auto','fp8'].map(d => `<option value="${d}"${_kvSelected===d?' selected':''}>${d}</option>`).join('');
-      const _l = (name, tip) => `<span>${name}<span class="hwfit-hint" title="${tip}">?</span></span>`;
+      const _t = (k, v) => (window.__t || (kk => kk))(k, v);
+      const _l = (nameKey, tipKey) => `<span>${_t('cookbook.serve.' + nameKey)}<span class="hwfit-hint" title="${_t('cookbook.serve.' + tipKey)}">?</span></span>`;
       const _ggufChoices = _runnableGgufFiles(m);
       const _savedGguf = String(sv('gguf_file', '') || '');
       const _preferredGgufInclude = String(sv('_preferredGgufInclude', '') || '').replace(/\*/g, '').toLowerCase();
@@ -1331,7 +1326,8 @@ function _rerenderCachedModels() {
           : `This model's download isn't complete yet (${esc(m.size || 'partial')}). The serve will start but is likely to crash on a missing shard. Wait for the download to finish, or relaunch after it's done.`;
         panelHtml += `<div class="hwfit-serve-warn" style="margin:0 0 8px;padding:6px 10px;border-radius:5px;font-size:11px;background:color-mix(in srgb, var(--color-warning, #f0ad4e) 14%, transparent);border:1px solid color-mix(in srgb, var(--color-warning, #f0ad4e) 40%, transparent);color:var(--color-warning, #f0ad4e);display:flex;gap:6px;align-items:flex-start;line-height:1.4;"><span aria-hidden="true">⚠</span><span>${_warnText}</span></div>`;
       }
-      panelHtml += `<div class="hwfit-serve-vision-warn" style="display:none;margin:0 0 8px;padding:6px 10px;border-radius:5px;font-size:11px;background:color-mix(in srgb, var(--color-warning, #f0ad4e) 14%, transparent);border:1px solid color-mix(in srgb, var(--color-warning, #f0ad4e) 40%, transparent);color:var(--color-warning, #f0ad4e);gap:6px;align-items:flex-start;line-height:1.4;"><span aria-hidden="true">⚠</span><span>Vision is enabled, but no mmproj GGUF projector was found in the cached model scan. Download an mmproj-*.gguf for this model, then refresh the cached model list before launching.</span></div>`;
+      panelHtml += `<div class="hwfit-serve-preset-row">${_slotsHtml}</div>`;
+      panelHtml += `<div class="hwfit-serve-vision-warn" style="display:none;margin:0 0 8px;padding:6px 10px;border-radius:5px;font-size:11px;background:color-mix(in srgb, var(--color-warning, #f0ad4e) 14%, transparent);border:1px solid color-mix(in srgb, var(--color-warning, #f0ad4e) 40%, transparent);color:var(--color-warning, #f0ad4e);gap:6px;align-items:flex-start;line-height:1.4;"><span aria-hidden="true">⚠</span><span>${(window.__t || (k=>k))('cookbook.visionProjectorMissing')}</span></div>`;
       // Row 1: Engine + Server + Env
       panelHtml += `<div class="hwfit-serve-row">`;
       const backendOpts = _backendChoices.map(([v,l]) => `<option value="${v}"${defaultBackend===v?' selected':''}>${l}</option>`).join('');
@@ -1341,7 +1337,7 @@ function _rerenderCachedModels() {
       // stays as the source-of-truth so every existing change handler
       // (updateBackendVisibility, runtime readiness, command builder)
       // still fires via dispatchEvent('change') on selection.
-      panelHtml += `<label>${_l('Engine','Inference engine: MLX, vLLM, SGLang, llama.cpp, Ollama, or Diffusers')}<div class="hwfit-backend-picker" data-backend-picker style="position:relative;width:100%;"><select class="hwfit-sf hwfit-backend-source" data-field="backend" style="display:none;">${backendOpts}</select><button type="button" class="hwfit-backend-btn" data-backend-btn aria-haspopup="listbox" aria-expanded="false" style="display:flex;align-items:center;gap:6px;width:100%;height:32px;padding:0 8px;background:var(--bg);color:var(--fg);border:1px solid var(--border);border-radius:4px;font:inherit;font-size:11px;cursor:pointer;text-align:left;position:relative;top:-4px;"><span class="hwfit-backend-btn-icon" data-backend-icon-slot aria-hidden="true" style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;color:var(--accent, var(--red));flex-shrink:0;"></span><span class="hwfit-backend-btn-label" data-backend-label style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"></span><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="opacity:0.6;flex-shrink:0;"><polyline points="6 9 12 15 18 9"/></svg></button><div class="hwfit-backend-menu" data-backend-menu role="listbox" hidden style="position:absolute;top:calc(100% + 4px);left:0;right:0;z-index:100;background:var(--panel, var(--bg));border:1px solid var(--border);border-radius:6px;box-shadow:0 6px 20px rgba(0,0,0,0.22);padding:4px;"></div></div></label>`;
+      panelHtml += `<label>${_l('engine','engineTip')}<div class="hwfit-backend-picker" data-backend-picker style="position:relative;width:100%;"><select class="hwfit-sf hwfit-backend-source" data-field="backend" style="display:none;">${backendOpts}</select><button type="button" class="hwfit-backend-btn" data-backend-btn aria-haspopup="listbox" aria-expanded="false" style="display:flex;align-items:center;gap:6px;width:100%;height:32px;padding:0 8px;background:var(--bg);color:var(--fg);border:1px solid var(--border);border-radius:4px;font:inherit;font-size:11px;cursor:pointer;text-align:left;position:relative;top:-4px;"><span class="hwfit-backend-btn-icon" data-backend-icon-slot aria-hidden="true" style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;color:var(--accent, var(--red));flex-shrink:0;"></span><span class="hwfit-backend-btn-label" data-backend-label style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"></span><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="opacity:0.6;flex-shrink:0;"><polyline points="6 9 12 15 18 9"/></svg></button><div class="hwfit-backend-menu" data-backend-menu role="listbox" hidden style="position:absolute;top:calc(100% + 4px);left:0;right:0;z-index:100;background:var(--panel, var(--bg));border:1px solid var(--border);border-radius:6px;box-shadow:0 6px 20px rgba(0,0,0,0.22);padding:4px;"></div></div></label>`;
       panelHtml += `<input type="hidden" class="hwfit-sf" data-field="host" value="${esc(_es.remoteHost || '')}" />`;
       // Inference mode pill (llama.cpp only) — lives directly to the
       // RIGHT of Backend in Row 1 so the engine and the GPU/CPU choice
@@ -1365,11 +1361,11 @@ function _rerenderCachedModels() {
         const _savedUnified = !!sv('unified_mem', false);
         const _llamaModeRaw = sv('llama_mode', _llamaModeDefault);
         const _llamaMode = _savedUnified && _llamaModeRaw !== 'cpu' ? 'unified' : _llamaModeRaw;
-        panelHtml += `<label class="hwfit-backend-llamacpp">${_l('Inference','CPU = -ngl 0. GPU = -ngl 99. Unified = GPU offload plus GGML_CUDA_ENABLE_UNIFIED_MEMORY=1 for unified-memory CUDA systems.')}<div class="mode-toggle mode-toggle-three${_llamaMode === 'gpu' ? ' mode-mid' : (_llamaMode === 'unified' ? ' mode-third' : '')}" data-llama-mode-toggle style="display:flex;width:100%;height:32px;position:relative;top:2px;"><button type="button" class="mode-toggle-btn${_llamaMode === 'cpu' ? ' active' : ''}" data-llama-mode="cpu" aria-pressed="${_llamaMode === 'cpu'}" style="flex:1;"><span style="position:relative;top:-7px;">CPU</span></button><button type="button" class="mode-toggle-btn${_llamaMode === 'gpu' ? ' active' : ''}" data-llama-mode="gpu" aria-pressed="${_llamaMode === 'gpu'}" style="flex:1;"><span style="position:relative;top:-7px;">GPU</span></button><button type="button" class="mode-toggle-btn${_llamaMode === 'unified' ? ' active' : ''}" data-llama-mode="unified" aria-pressed="${_llamaMode === 'unified'}" style="flex:1;"><span style="position:relative;top:-7px;">Unified</span></button></div><input type="hidden" class="hwfit-sf" data-field="llama_mode" value="${esc(_llamaMode)}" /><input type="hidden" class="hwfit-sf" data-field="unified_mem" value="${_llamaMode === 'unified' ? '1' : ''}" /></label>`;
+        panelHtml += `<label class="hwfit-backend-llamacpp">${_l('inference','inferenceTip')}<div class="mode-toggle mode-toggle-three${_llamaMode === 'gpu' ? ' mode-mid' : (_llamaMode === 'unified' ? ' mode-third' : '')}" data-llama-mode-toggle style="display:flex;width:100%;height:32px;position:relative;top:2px;"><button type="button" class="mode-toggle-btn${_llamaMode === 'cpu' ? ' active' : ''}" data-llama-mode="cpu" aria-pressed="${_llamaMode === 'cpu'}" style="flex:1;"><span style="position:relative;top:-7px;">CPU</span></button><button type="button" class="mode-toggle-btn${_llamaMode === 'gpu' ? ' active' : ''}" data-llama-mode="gpu" aria-pressed="${_llamaMode === 'gpu'}" style="flex:1;"><span style="position:relative;top:-7px;">GPU</span></button><button type="button" class="mode-toggle-btn${_llamaMode === 'unified' ? ' active' : ''}" data-llama-mode="unified" aria-pressed="${_llamaMode === 'unified'}" style="flex:1;"><span style="position:relative;top:-7px;">Unified</span></button></div><input type="hidden" class="hwfit-sf" data-field="llama_mode" value="${esc(_llamaMode)}" /><input type="hidden" class="hwfit-sf" data-field="unified_mem" value="${_llamaMode === 'unified' ? '1' : ''}" /></label>`;
       }
-      panelHtml += `<label>${_l('venv / conda','Path to a Python venv, or a Conda env name/path when the selected server uses Conda.')}<input type="text" class="hwfit-sf hwfit-sf-wide" data-field="venv" value="${esc(sv('venv', _es.envPath || _srvVenv || ''))}" placeholder="~/venv or conda-env" /></label>`;
+      panelHtml += `<label>${_l('venvConda','venvCondaTip')}<input type="text" class="hwfit-sf hwfit-sf-wide" data-field="venv" value="${esc(sv('venv', _es.envPath || _srvVenv || ''))}" placeholder="${_t('cookbook.venvPlaceholder')}" /></label>`;
       const defaultPort = defaultBackend === 'ollama' ? '11434' : _nextAvailablePort();
-      panelHtml += `<label>${_l('Port','HTTP port for the API server')}<input type="text" class="hwfit-sf" data-field="port" value="${esc(sv('port', defaultPort))}" /></label>`;
+      panelHtml += `<label>${_l('port','portTip')}<input type="text" class="hwfit-sf" data-field="port" value="${esc(sv('port', defaultPort))}" /></label>`;
       const _activeGpus = (defaultGpus || '').split(',').map(s => s.trim()).filter(Boolean);
       const detectedGpuCount = Number(_getGpuToggleTotal?.() || 0);
       const _gpuMax = Math.max(detectedGpuCount || 8, ...(_activeGpus.map(Number).filter(n => !isNaN(n)).map(n => n + 1)));
@@ -1383,7 +1379,7 @@ function _rerenderCachedModels() {
       // separates the GPU chiclets from the GPU Mem field that follows
       // (asked-for breathing room; 4px on either side felt cramped on
       // the GPU-Mem boundary).
-      const _gpusLabelHtml = `<label class="hwfit-gpus-label cookbook-llama-gpu-only" style="margin:0 8px 0 4px;">${_l('GPUs','Toggle which GPUs to use')}<div class="cookbook-gpu-group">${_gpuBtnsHtml}</div><input type="hidden" class="hwfit-sf" data-field="gpus" value="${esc(defaultGpus)}" /></label>`;
+      const _gpusLabelHtml = `<label class="hwfit-gpus-label cookbook-llama-gpu-only" style="margin:0 8px 0 4px;">${_l('gpus','gpusTip')}<div class="cookbook-gpu-group">${_gpuBtnsHtml}</div><input type="hidden" class="hwfit-sf" data-field="gpus" value="${esc(defaultGpus)}" /></label>`;
       panelHtml += _gpusLabelHtml;
       panelHtml += `</div>`;
       // (hwfit-serve-runtime-note moved to the top of the panel — see above.)
@@ -1394,7 +1390,7 @@ function _rerenderCachedModels() {
         // helper falls back to "first sorted gguf", which may not match what
         // the user picked).
         panelHtml += `<div class="hwfit-serve-row hwfit-backend-llamacpp hwfit-backend-ollama">`;
-        panelHtml += `<label class="hwfit-backend-llamacpp hwfit-backend-ollama">${_l('GGUF File','Choose the exact GGUF artifact to serve from this cached model folder.')}<select class="hwfit-sf hwfit-sf-wide" data-field="gguf_file">${_ggufOptions}</select></label>`;
+        panelHtml += `<label class="hwfit-backend-llamacpp hwfit-backend-ollama">${_l('ggufFile','ggufFileTip')}<select class="hwfit-sf hwfit-sf-wide" data-field="gguf_file">${_ggufOptions}</select></label>`;
         panelHtml += `</div>`;
       } else if (_defaultGguf) {
         panelHtml += `<input type="hidden" class="hwfit-sf" data-field="gguf_file" value="${esc(_defaultGguf)}" />`;
@@ -1409,20 +1405,20 @@ function _rerenderCachedModels() {
       // (llama.cpp GPU/CPU toggle, llamacpp-only). GPUs lives next to
       // GPU Mem so "which devices + how much" sit adjacent. Max Seqs
       // follows Context per the "request-shape" cluster.
-      panelHtml += `<label class="hwfit-backend-vllm hwfit-backend-sglang hwfit-backend-llamacpp">${_l('Dtype','Data type for weights. auto picks best for GPU')}<select class="hwfit-sf" data-field="dtype">${dtypeOpts}</select></label>`;
-      panelHtml += `<label class="hwfit-backend-vllm hwfit-backend-sglang">${_l('TP','Tensor Parallelism — split model across N GPUs')}<select class="hwfit-sf" data-field="tp">${tpOpts}</select></label>`;
+      panelHtml += `<label class="hwfit-backend-vllm hwfit-backend-sglang hwfit-backend-llamacpp">${_l('dtype','dtypeTip')}<select class="hwfit-sf" data-field="dtype">${dtypeOpts}</select></label>`;
+      panelHtml += `<label class="hwfit-backend-vllm hwfit-backend-sglang">${_l('tp','tpTip')}<select class="hwfit-sf" data-field="tp">${tpOpts}</select></label>`;
       // ctx resets to the model's max on every panel open (the real ctx slider
       // lives in the Scan/Download toolbar — see cookbook.js .hwfit-ctx-control).
       const _knownCtxDefault = _knownModelContextMax({ ...m, repo_id: repo });
       const _ctxDefault = _knownCtxDefault ? String(_knownCtxDefault) : (m.context_length || m.context || '20000');
       const _ctxSavedValue = sv('ctx', _ctxDefault);
       const _ctxValue = _isMiniMaxMSeries && ['20000', '32768'].includes(String(_ctxSavedValue)) ? _ctxDefault : _ctxSavedValue;
-      panelHtml += `<label class="hwfit-context-label">${_l('Context','Max tokens per request. Calculate suggests a value from model limit + selected GPU VRAM; edit manually to override.')}<span class="hwfit-context-control"><input type="text" class="hwfit-sf" data-field="ctx" value="${esc(_ctxValue)}" /><button type="button" class="hwfit-context-calc-btn cookbook-btn" title="Calculate and use suggested context from scanned hardware">Auto</button></span><span class="hwfit-auto-ctx-note"></span></label>`;
-      panelHtml += `<label class="hwfit-backend-vllm hwfit-backend-sglang">${_l('Max Seqs','Maximum concurrent requests. Lower = less memory. Default 4 — prosumer GPUs often OOM on vLLM default 256 during CUDA graph capture.')}<input type="text" class="hwfit-sf" data-field="max_seqs" value="${esc(sv('max_seqs', '4'))}" placeholder="4" /></label>`;
+      panelHtml += `<label class="hwfit-context-label">${_l('context','contextTip')}<span class="hwfit-context-control"><input type="text" class="hwfit-sf" data-field="ctx" value="${esc(_ctxValue)}" /><button type="button" class="hwfit-context-calc-btn cookbook-btn" title="${_t('cookbook.serve.auto')}">${_t('cookbook.serve.auto')}</button></span><span class="hwfit-auto-ctx-note"></span></label>`;
+      panelHtml += `<label class="hwfit-backend-vllm hwfit-backend-sglang">${_l('maxSeqs','maxSeqsTip')}<input type="text" class="hwfit-sf" data-field="max_seqs" value="${esc(sv('max_seqs', '4'))}" placeholder="4" /></label>`;
       // GPU "auto" field removed — the GPU button strip below already
       // writes data-field="gpus" (the canonical comma-separated device
       // list) and the command builders now read from that single source.
-      panelHtml += `<label class="hwfit-backend-vllm hwfit-backend-sglang">${_l('GPU Mem','Fraction of GPU memory (0.0–1.0). Lower if OOM')}<input type="text" class="hwfit-sf" data-field="gpu_mem" value="${esc(sv('gpu_mem', _isMiniMaxMSeries ? '0.95' : '0.90'))}" /></label>`;
+      panelHtml += `<label class="hwfit-backend-vllm hwfit-backend-sglang">${_l('gpuMem','gpuMemTip')}<input type="text" class="hwfit-sf" data-field="gpu_mem" value="${esc(sv('gpu_mem', _isMiniMaxMSeries ? '0.95' : '0.90'))}" /></label>`;
       panelHtml += `</div>`;
       // ── Advanced (collapsed by default) ──
       // Everything below the fold is tuning users only touch occasionally:
@@ -1432,12 +1428,12 @@ function _rerenderCachedModels() {
       // re-renders cheaply and a closed fold doesn't trigger any layout
       // work for the dozens of nested inputs.
       panelHtml += `<details class="hwfit-serve-advanced"${_isMiniMaxM3 ? ' open' : ''}>`;
-      panelHtml += `<summary class="hwfit-serve-advanced-summary">Advanced</summary>`;
+      panelHtml += `<summary class="hwfit-serve-advanced-summary">${(window.__t || (k=>k))('cookbook.advanced')}</summary>`;
       // Advanced vLLM/SGLang row (KV Cache, Attention, Swap, Env)
       panelHtml += `<div class="hwfit-serve-row hwfit-backend-vllm hwfit-backend-sglang">`;
-      panelHtml += `<label class="hwfit-backend-vllm" style="grid-column:1 / -1;">${_l('Served Name','vLLM --served-model-name. Keeps the OpenAI model id stable when serving from a local snapshot path.')}<input type="text" class="hwfit-sf" data-field="served_model_name" value="${esc(svm('served_model_name', _defaultServedModelName))}" placeholder="${esc(repo)}" style="width:100%;" /></label>`;
-      panelHtml += `<label class="hwfit-backend-vllm" style="grid-column:1 / -1;">${_l('Model Path','Argument passed after `vllm serve`. MiniMax M3 auto-fills the cached snapshot path because the nightly runtime needs the local repo files.')}<input type="text" class="hwfit-sf" data-field="model_path" value="${esc(_modelPathValue)}" placeholder="${esc(repo)}" style="width:100%;" /></label>`;
-      panelHtml += `<label class="hwfit-backend-vllm">${_l('KV Cache','vLLM --kv-cache-dtype. auto uses the model/runtime default; fp8 reduces KV memory for long context.')}<select class="hwfit-sf" data-field="vllm_kv_cache_dtype" style="height:32px;">${vllmKvCacheOpts}</select></label>`;
+      panelHtml += `<label class="hwfit-backend-vllm" style="grid-column:1 / -1;">${_l('servedName','servedNameTip')}<input type="text" class="hwfit-sf" data-field="served_model_name" value="${esc(svm('served_model_name', _defaultServedModelName))}" placeholder="${esc(repo)}" style="width:100%;" /></label>`;
+      panelHtml += `<label class="hwfit-backend-vllm" style="grid-column:1 / -1;">${_l('modelPath','modelPathTip')}<input type="text" class="hwfit-sf" data-field="model_path" value="${esc(_modelPathValue)}" placeholder="${esc(repo)}" style="width:100%;" /></label>`;
+      panelHtml += `<label class="hwfit-backend-vllm">${_l('kvCache','kvCacheTip')}<select class="hwfit-sf" data-field="vllm_kv_cache_dtype" style="height:32px;">${vllmKvCacheOpts}</select></label>`;
       // Attention backend selector — pin the kernel impl. Default `auto` lets
       // vLLM pick FlashInfer (which JITs on first use and breaks on older
       // system nvcc) → FlashAttention → xformers. Forcing FLASH_ATTN skips
@@ -1449,9 +1445,9 @@ function _rerenderCachedModels() {
         : svm('vllm_attn_backend', _attnDefault);
       const vllmAttnBackendOpts = ['auto', 'TRITON_ATTN', 'FLASH_ATTN', 'XFORMERS', 'FLASHINFER', 'TORCH_SDPA']
         .map(b => `<option value="${b === 'auto' ? '' : b}"${(_attnSelected === (b === 'auto' ? '' : b)) ? ' selected' : ''}>${b}</option>`).join('');
-      panelHtml += `<label class="hwfit-backend-vllm">${_l('Attention','vLLM VLLM_ATTENTION_BACKEND. auto = vLLM picks (often FLASHINFER, which JITs and can fail on old nvcc). FLASH_ATTN skips the JIT entirely.')}<select class="hwfit-sf" data-field="vllm_attn_backend" style="height:32px;">${vllmAttnBackendOpts}</select></label>`;
-      panelHtml += `<label class="hwfit-backend-vllm">${_l('Block Size','vLLM --block-size. Controls KV-cache block granularity. Leave blank for runtime default; some sparse-attention or custom runtimes need a specific value.')}<input type="text" class="hwfit-sf" data-field="vllm_block_size" value="${esc(svm('vllm_block_size', _isMiniMaxM3 ? '128' : ''))}" placeholder="auto" /></label>`;
-      panelHtml += `<label class="hwfit-backend-vllm">${_l('Swap','vLLM CPU swap space in GB. Blank/off omits the flag; enter a positive number only for older vLLM runtimes that support --swap-space.')}<input type="text" class="hwfit-sf" data-field="swap" value="${esc(sv('swap', ''))}" placeholder="off" /></label>`;
+      panelHtml += `<label class="hwfit-backend-vllm">${_l('attention','attentionTip')}<select class="hwfit-sf" data-field="vllm_attn_backend" style="height:32px;">${vllmAttnBackendOpts}</select></label>`;
+      panelHtml += `<label class="hwfit-backend-vllm">${_l('blockSize','blockSizeTip')}<input type="text" class="hwfit-sf" data-field="vllm_block_size" value="${esc(svm('vllm_block_size', _isMiniMaxM3 ? '128' : ''))}" placeholder="auto" /></label>`;
+      panelHtml += `<label class="hwfit-backend-vllm">${_l('swap','swapTip')}<input type="text" class="hwfit-sf" data-field="swap" value="${esc(sv('swap', ''))}" placeholder="off" /></label>`;
       {
         const _envPresetDefault = _isMiniMaxM3 ? 'minimax_m3_cuda' : '';
         const _envPresetVal = svm('vllm_env_preset', _envPresetDefault);
@@ -1459,7 +1455,7 @@ function _rerenderCachedModels() {
           ['', 'None'],
           ['minimax_m3_cuda', 'CUDA native sampler'],
         ].map(([v, label]) => `<option value="${v}"${_envPresetVal === v ? ' selected' : ''}>${label}</option>`).join('');
-        panelHtml += `<label class="hwfit-backend-vllm" style="grid-column:1 / 2;">${_l('Env Preset','Adds known-good environment variables without typing them. CUDA native sampler adds VLLM_TARGET_DEVICE=cuda and disables FlashInfer sampler JIT; useful when system nvcc cannot compile the sampler for the GPU architecture.')}<select class="hwfit-sf" data-field="vllm_env_preset" style="height:32px;width:122px;">${_envPresetOpts}</select></label>`;
+        panelHtml += `<label class="hwfit-backend-vllm" style="grid-column:1 / 2;">${_l('envPreset','envPresetTip')}<select class="hwfit-sf" data-field="vllm_env_preset" style="height:32px;width:122px;">${_envPresetOpts}</select></label>`;
       }
       // Free-text env-vars field. Anything pasted here is prepended to the
       // launch command verbatim. Use for CUDACXX, PATH overrides, NCCL_*
@@ -1468,7 +1464,7 @@ function _rerenderCachedModels() {
       // already exported so they expand correctly here.
       // CSS places this beside vLLM's Env Preset, but lets it span the full
       // row for SGLang where that preset field is hidden.
-      panelHtml += `<label class="hwfit-backend-vllm hwfit-backend-sglang hwfit-extra-env-label">${_l('Env','Extra KEY=VALUE env-var pairs prepended to the launch (space-separated). The Env Preset above covers the usual MiniMax M3 values; use this for additional overrides.')}<input type="text" class="hwfit-sf" data-field="extra_env" value="${esc(svm('extra_env', sv('extra_env','')))}" placeholder="NCCL_P2P_DISABLE=1" style="width:100%;" /></label>`;
+      panelHtml += `<label class="hwfit-backend-vllm hwfit-backend-sglang hwfit-extra-env-label">${_l('env','envTip')}<input type="text" class="hwfit-sf" data-field="extra_env" value="${esc(svm('extra_env', sv('extra_env','')))}" placeholder="NCCL_P2P_DISABLE=1" style="width:100%;" /></label>`;
       panelHtml += `</div>`;
       // Row 2b: Diffusers settings
       const diffDtypeOpts = ['bfloat16','float16','float32'].map(d => `<option value="${d}"${sv('diff_dtype','bfloat16')===d?' selected':''}>${d}</option>`).join('');
@@ -1537,23 +1533,23 @@ function _rerenderCachedModels() {
 
       // Group 1 — GPU placement (GPU-only, hides in CPU mode)
       panelHtml += `<div class="hwfit-serve-row hwfit-backend-llamacpp cookbook-llama-gpu-only hwfit-llama-placement-row">`;
-      panelHtml += `<label>${_l('Split Mode','llama.cpp GPU placement. layer = default; tensor splits weights and KV across GPUs.')}<select class="hwfit-sf" data-field="llama_split_mode">${llamaSplitModeOpts}</select></label>`;
-      panelHtml += `<label>${_l('Tensor Split','GPU proportions, e.g. 50,50 across two GPUs. Blank = auto.')}<input type="text" class="hwfit-sf" data-field="llama_tensor_split" value="${esc(sv('llama_tensor_split', ''))}" placeholder="auto" /></label>`;
-      panelHtml += `<label>${_l('Main GPU','--main-gpu index inside the visible GPU set. Useful for split mode none/row.')}<input type="text" class="hwfit-sf" data-field="llama_main_gpu" value="${esc(sv('llama_main_gpu', ''))}" placeholder="auto" /></label>`;
+      panelHtml += `<label>${_l('splitMode','splitModeTip')}<select class="hwfit-sf" data-field="llama_split_mode">${llamaSplitModeOpts}</select></label>`;
+      panelHtml += `<label>${_l('tensorSplit','tensorSplitTip')}<input type="text" class="hwfit-sf" data-field="llama_tensor_split" value="${esc(sv('llama_tensor_split', ''))}" placeholder="auto" /></label>`;
+      panelHtml += `<label>${_l('mainGpu','mainGpuTip')}<input type="text" class="hwfit-sf" data-field="llama_main_gpu" value="${esc(sv('llama_main_gpu', ''))}" placeholder="auto" /></label>`;
       panelHtml += `</div>`;
 
       // Group 2 — Memory tuning (KV cache + MoE-on-CPU + Fit policy)
       panelHtml += `<div class="hwfit-serve-row hwfit-backend-llamacpp hwfit-llama-memory-row">`;
-      panelHtml += `<label>${_l('KV Cache','cache-type-k/v: quantize the KV cache. q4_0 = smallest (more context), q8_0 = long-context, f16 = full.')}<select class="hwfit-sf" data-field="cache_type">${_kvOpts}</select></label>`;
-      panelHtml += `<label class="cookbook-llama-gpu-only">${_l('CPU MoE','n-cpu-moe: number of MoE expert layers to run on CPU when the model is bigger than VRAM. 0 = all on GPU.')}<input type="text" class="hwfit-sf" data-field="n_cpu_moe" value="${esc(sv('n_cpu_moe',''))}" placeholder="0" /></label>`;
-      panelHtml += `<label>${_l('Fit','llama.cpp --fit. Leave default unless you need explicit off/on behavior for a preset.')}<select class="hwfit-sf" data-field="llama_fit">${llamaFitOpts}</select></label>`;
+      panelHtml += `<label>${_l('kvCache','kvCacheTip')}<select class="hwfit-sf" data-field="cache_type">${_kvOpts}</select></label>`;
+      panelHtml += `<label class="cookbook-llama-gpu-only">${_l('cpuMoe','cpuMoeTip')}<input type="text" class="hwfit-sf" data-field="n_cpu_moe" value="${esc(sv('n_cpu_moe',''))}" placeholder="0" /></label>`;
+      panelHtml += `<label>${_l('fit','fitTip')}<select class="hwfit-sf" data-field="llama_fit">${llamaFitOpts}</select></label>`;
       panelHtml += `</div>`;
 
       // Group 3 — Request batching (Batch / UBatch / Parallel)
       panelHtml += `<div class="hwfit-serve-row hwfit-backend-llamacpp hwfit-llama-batch-row">`;
-      panelHtml += `<label>${_l('Batch','llama.cpp prompt batch size. Blank = default.')}<input type="text" class="hwfit-sf" data-field="llama_batch_size" value="${esc(sv('llama_batch_size', ''))}" placeholder="2048" /></label>`;
-      panelHtml += `<label>${_l('UBatch','llama.cpp physical micro-batch size. Blank = default.')}<input type="text" class="hwfit-sf" data-field="llama_ubatch_size" value="${esc(sv('llama_ubatch_size', ''))}" placeholder="512" /></label>`;
-      panelHtml += `<label>${_l('Parallel','llama.cpp parallel slots. Blank = default; 1 matches single-lane presets.')}<input type="text" class="hwfit-sf" data-field="llama_parallel" value="${esc(sv('llama_parallel', ''))}" placeholder="1" /></label>`;
+      panelHtml += `<label>${_l('batch','batchTip')}<input type="text" class="hwfit-sf" data-field="llama_batch_size" value="${esc(sv('llama_batch_size', ''))}" placeholder="2048" /></label>`;
+      panelHtml += `<label>${_l('ubatch','ubatchTip')}<input type="text" class="hwfit-sf" data-field="llama_ubatch_size" value="${esc(sv('llama_ubatch_size', ''))}" placeholder="512" /></label>`;
+      panelHtml += `<label>${_l('parallel','parallelTip')}<input type="text" class="hwfit-sf" data-field="llama_parallel" value="${esc(sv('llama_parallel', ''))}" placeholder="1" /></label>`;
       panelHtml += `</div>`;
       // Auto-profile chips row removed — visual fit with the rest of the
       // serve panel was off, and the manual ctx/n_cpu_moe/cache controls
@@ -1605,24 +1601,24 @@ function _rerenderCachedModels() {
       // button can sit at its top-right corner — same pattern as the chat
       // run-output panel.
       panelHtml += `<details class="hwfit-serve-cmd-details">`;
-      panelHtml += `<summary class="hwfit-serve-cmd-summary">Launch command</summary>`;
+      panelHtml += `<summary class="hwfit-serve-cmd-summary">${(window.__t || (k=>k))('cookbook.launchCommand')}</summary>`;
       panelHtml += `<div class="hwfit-serve-cmd-wrap">`;
       panelHtml += `<textarea class="hwfit-serve-cmd" spellcheck="false" rows="2"></textarea>`;
       panelHtml += `<button type="button" class="cookbook-btn hwfit-serve-copy hwfit-serve-copy-inline" title="Copy launch command" aria-label="Copy"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>`;
       panelHtml += `</div>`;
       panelHtml += `</details>`;
       panelHtml += `<div class="hwfit-serve-actions">`;
-      panelHtml += `<button class="cookbook-btn hwfit-serve-cancel" type="button" title="Close this configuration panel"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:5px;flex-shrink:0;"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>Cancel</button>`;
+      panelHtml += `<button class="cookbook-btn hwfit-serve-cancel" type="button" title="Close this configuration panel"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:5px;flex-shrink:0;"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>${(window.__t || (k=>k))('cookbook.cancel')}</button>`;
       // Copy moved inside the command textarea (top-right). Spacer then
       // pushes Clear Server + Launch to the right.
       panelHtml += `<span class="hwfit-serve-actions-spacer"></span>`;
-      panelHtml += `<button class="cookbook-btn cookbook-gpu-clear" style="display:none;" title="Clear server GPU memory by stopping processes that hold VRAM (SIGTERM first)">Clear Server</button>`;
-      panelHtml += `<button class="cookbook-btn cookbook-gpu-probe" style="display:none;" title="Probe GPU memory and running GPU processes">Probe GPUs</button>`;
+      panelHtml += `<button class="cookbook-btn cookbook-gpu-clear" style="display:none;" title="${(window.__t || (k=>k))('cookbook.clearServer')}">${(window.__t || (k=>k))('cookbook.clearServer')}</button>`;
+      panelHtml += `<button class="cookbook-btn cookbook-gpu-probe" style="display:none;" title="${(window.__t || (k=>k))('cookbook.probeGpus')}">${(window.__t || (k=>k))('cookbook.probeGpus')}</button>`;
       // Launch + a small ^ that opens an inline schedule form. The form
       // creates a ScheduledTask (action=cookbook_serve), so the schedule
       // ends up in the existing Tasks UI for edit/delete/pause.
       panelHtml += `<span class="hwfit-serve-launch-group">`;
-      panelHtml += `<button class="cookbook-btn hwfit-serve-launch"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:4px;flex-shrink:0;"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>Launch</button>`;
+      panelHtml += `<button class="cookbook-btn hwfit-serve-launch"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:4px;flex-shrink:0;"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>${(window.__t || (k=>k))('cookbook.launch')}</button>`;
       // Chevron points DOWN because the schedule form opens beneath the
       // panel — the arrow signals the direction of motion, not menu state.
       panelHtml += `<button class="cookbook-btn hwfit-serve-schedule-arrow" type="button" aria-haspopup="menu" aria-label="More launch actions" title="More launch actions"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></button>`;
@@ -1685,11 +1681,11 @@ function _rerenderCachedModels() {
             : m.is_local_dir && m.path
             ? `$({ find ${_ldir} -name '*-00001-of-*.gguf' 2>/dev/null | sort; find ${_ldir} -name '*.gguf' 2>/dev/null | sort; } | head -1)`
             : `$({ find ${dir} -name '*-00001-of-*.gguf' 2>/dev/null | sort; find ${dir} -name '*.gguf' 2>/dev/null | sort; } | head -1)`;
-          // Vision: use the scanned projector (CLIP/mmproj) file when present.
-          // Keeping this as a printf path avoids generating a command substitution
-          // that the backend serve-command validator must reject as unsafe.
-          const selectedProjector = _projectorGgufFiles(m)[0];
-          f._mmproj_path = selectedProjector ? _selectedGgufExpr(m, repo, selectedProjector.rel_path) : '';
+          // Vision: auto-find the mmproj (CLIP/projector) file in the same dir.
+          // Resolved at runtime so the toggle just works if an mmproj-*.gguf is
+          // present (downloaded alongside the model). Empty if none → cmd omits it.
+          const _vsearchdir = (m.is_local_dir && m.path) ? _ldir : dir;
+          f._mmproj_path = `$(find ${_vsearchdir} -iname 'mmproj*.gguf' 2>/dev/null | sort | head -1)`;
         }
         if (f.reasoning_parser) {
           const _rpEl2 = panel.querySelector('[data-field="reasoning_parser"]');
@@ -1705,10 +1701,6 @@ function _rerenderCachedModels() {
         }
         let cmd = _buildServeCmd(f, serveModel, backend);
         if (f.extra && f.extra.trim()) cmd += ' ' + f.extra.trim();
-        const missingVisionProjector = backend === 'llamacpp' && !!f.vision && !f._mmproj_path;
-        panel._visionMissingProjector = missingVisionProjector;
-        const _visionWarn = panel.querySelector('.hwfit-serve-vision-warn');
-        if (_visionWarn) _visionWarn.style.display = missingVisionProjector ? 'flex' : 'none';
         const _ce2 = panel.querySelector('.hwfit-serve-cmd'); _ce2.value = _formatServeCmdPreview(cmd); _ce2.style.height = 'auto'; _ce2.style.height = _ce2.scrollHeight + 'px';
         panel._cmd = cmd;
         panel._host = f.host || '';
@@ -1819,7 +1811,7 @@ function _rerenderCachedModels() {
         if (Number.isFinite(v) && v > cap) {
           _ctxEl0.value = String(cap);
           _ctxEl0.title = `Capped to ${panel._modelCtxMax > 0 ? "this model's trained limit" : "the maximum sane context"} (${cap}).`;
-          if (announce) uiModule.showToast(`Context capped to ${cap}`);
+          if (announce) uiModule.showToast(_t('cookbook.serve.contextCapped', {cap}));
           updateCmd();
         }
       }
@@ -2275,12 +2267,12 @@ function _rerenderCachedModels() {
         const _norm = s => String(s || '').replace(/\s+/g, ' ').trim();
         const _existing = modelSlots.find(p => _norm(p.cmd) === _norm(cmd));
         if (_existing) {
-          await window.styledConfirm(`This config is already saved as "${_existing.label || 'Unnamed'}".`, { confirmText: 'OK', cancelText: 'Close' });
+          await window.styledConfirm(_t('cookbook.serve.configAlreadySaved', {label: _existing.label || 'Unnamed'}), { confirmText: _t('cookbook.serve.ok'), cancelText: _t('cookbook.serve.close') });
           return false;
         }
-        if (modelSlots.length >= 5) { uiModule.showToast('Max 5 saves per model'); return false; }
+        if (modelSlots.length >= 5) { uiModule.showToast(_t('cookbook.serve.maxSaves')); return false; }
         const label = await uiModule.styledPrompt('Name this config so you can recall it later.', {
-          title: 'Save Config', placeholder: 'e.g. LoRA, 8-bit, fast', confirmText: 'Save',
+          title: 'Save Config', placeholder: 'e.g. LoRA, 8-bit, fast', confirmText: (window.__t || (k=>k))('common.save'),
         });
         if (!label) return false;
         const host = panel._host || '';
@@ -2291,7 +2283,7 @@ function _rerenderCachedModels() {
         });
         presets.push(_redactServeStateForStorage({ name: shortName, model: repo, cmd, remoteHost: host, port: fields.port || '8000', label, fields }));
         _savePresets(presets);
-        uiModule.showToast(`Saved "${label}"`);
+        uiModule.showToast(_t('cookbook.serve.configSaved', {label}));
         _updateSavedToggleLabel();
         return true;
       }
@@ -2320,7 +2312,7 @@ function _rerenderCachedModels() {
         if (!modelSlots.length) {
           const empty = document.createElement('div');
           empty.style.cssText = 'padding:6px 8px;opacity:0.5;position:relative;top:1px;';
-          empty.textContent = 'No saved configs yet';
+          empty.textContent = (window.__t || (k=>k))('cookbook.noSavedConfigs');
           dropdown.appendChild(empty);
         }
         modelSlots.forEach(({ preset: p, slotIdx }, idx) => {
@@ -2366,7 +2358,7 @@ function _rerenderCachedModels() {
             _loadSlotIntoPanel(slotIdx);
             // Confirm the click landed — loading is silent otherwise, so it was
             // unclear the settings actually changed.
-            uiModule.showToast(`Loaded "${p.label || `Config ${idx + 1}`}"`);
+            uiModule.showToast(_t('cookbook.serve.configLoaded', {label: p.label || _t('cookbook.serve.configFallback', {n: idx + 1})}));
             // Briefly flash the command box so the user sees the panel update.
             const _cmdBox = panel.querySelector('.hwfit-serve-cmd');
             if (_cmdBox) {
@@ -2381,14 +2373,14 @@ function _rerenderCachedModels() {
             if (target) {
               target.favorite = !target.favorite;
               _savePresets(cur.map(_redactServeStateForStorage));
-              uiModule.showToast(target.favorite ? 'Favorited — pinned to top' : 'Unfavorited');
+              uiModule.showToast(target.favorite ? _t('cookbook.serve.favorited') : _t('cookbook.serve.unfavorited'));
               _showSavedConfigMenu(anchor);
             }
           });
           del.addEventListener('click', async (e) => {
             e.stopPropagation();
             const label = p.label || `Config ${idx + 1}`;
-            if (!await window.styledConfirm(`Delete saved config "${label}"?`, { confirmText: 'Delete', danger: true })) return;
+            if (!await window.styledConfirm(_t('cookbook.serve.deleteConfigConfirm', {label}), { confirmText: (window.__t || (k=>k))('common.delete'), danger: true })) return;
             const cur = _loadPresets();
             const toRemove = _presetsForModel(cur, repo)[slotIdx];
             if (toRemove) {
@@ -2396,7 +2388,7 @@ function _rerenderCachedModels() {
               if (gi >= 0) cur.splice(gi, 1);
               _savePresets(cur.map(_redactServeStateForStorage));
             }
-            uiModule.showToast(`Deleted "${label}"`);
+            uiModule.showToast(_t('cookbook.serve.configDeleted', {label}));
             _updateSavedToggleLabel();
             _showSavedConfigMenu(anchor);   // rebuild in place
           });
@@ -2460,7 +2452,7 @@ function _rerenderCachedModels() {
               .map(g => g.name));
             if (names.size > 1 && !panel._mixedGpuWarned) {
               panel._mixedGpuWarned = true;   // once per panel, don't nag
-              uiModule.showToast('Mixed GPU types selected — tensor-parallel needs identical GPUs. Pick one pool (e.g. all the same card).', 7000);
+              uiModule.showToast(_t('cookbook.serve.mixedGpuWarning'), 7000);
             } else if (names.size <= 1) {
               panel._mixedGpuWarned = false;  // reset once they're back to one pool
             }
@@ -2502,7 +2494,7 @@ function _rerenderCachedModels() {
             const cmd = (_cmdManuallyEdited && cmdBox)
               ? cmdBox.value
               : _formatServeCmdPreview(panel._cmd || cmdBox?.value || '');
-            _copyText(cmd).then(() => uiModule.showToast('Launch command copied'));
+            _copyText(cmd).then(() => uiModule.showToast(_t('cookbook.serve.launchCopied')));
           }));
           menu.appendChild(mk('Schedule', '', () => {
             const direct = new MouseEvent('click', { bubbles: true, cancelable: true });
@@ -2623,10 +2615,10 @@ function _rerenderCachedModels() {
           try { data = await res.json(); } catch (_) { data = {}; }
           if (!res.ok || !data.ok) {
             const err = data.error || data.detail || res.statusText || 'unknown';
-            uiModule.showToast(`Kill PID ${pid} failed: ${err}`, 6000);
+            uiModule.showToast(_t('cookbook.serve.killPidFailed', {pid, error: err}), 6000);
             return false;
           }
-          uiModule.showToast(`Sent SIG${sig} to PID ${pid}`, 3000);
+          uiModule.showToast(_t('cookbook.serve.sentSignal', {sig, pid}), 3000);
           return true;
         };
 
@@ -2686,7 +2678,7 @@ function _rerenderCachedModels() {
               const row = btn.closest('.cookbook-gpu-proc');
               const pid = parseInt(row.dataset.pid);
               const sig = btn.dataset.sig;
-              if (sig === 'KILL' && !await window.styledConfirm(`SIGKILL PID ${pid}? This force-terminates without cleanup.`, { confirmText: 'SIGKILL', danger: true })) return;
+              if (sig === 'KILL' && !await window.styledConfirm(_t('cookbook.serve.sigkillConfirm', {pid}), { confirmText: 'SIGKILL', danger: true })) return;
               btn.disabled = true;
               btn.textContent = '…';
               const ok = await _doKill(pid, sig, hostVal);
@@ -2727,7 +2719,7 @@ function _rerenderCachedModels() {
           if (!res.ok) {
             const err = data.detail || data.error || res.statusText || `HTTP ${res.status}`;
             const hint = res.status === 404 ? ' — server may need a restart to pick up new endpoint' : '';
-            if (!silent) uiModule.showToast('GPU probe failed: ' + err + hint, 8000);
+            if (!silent) uiModule.showToast(_t('cookbook.serve.gpuProbeFailed', {error: err + hint}), 8000);
             return null;
           }
           if (!data.ok) {
@@ -2795,13 +2787,13 @@ function _rerenderCachedModels() {
           });
           if (!silent) {
             if (data.gpus.length === 0) {
-              uiModule.showToast('No GPU memory probe data available', 4000);
+              uiModule.showToast(_t('cookbook.serve.noGpuProbeData'), 4000);
             } else {
               const summary = data.gpus.map(g => {
                 const procs = (g.processes && g.processes.length) || 0;
                 return `GPU${g.index}: ${(g.free_mb/1024).toFixed(1)}G free` + (procs ? ` (${procs}p)` : '');
               }).join(' · ');
-              uiModule.showToast(summary + ' · dbl-click a GPU button to view/kill processes', 7000);
+              uiModule.showToast(summary + ' · ' + _t('cookbook.serve.gpuProbeHint'), 7000);
             }
           }
           return data;
@@ -3086,16 +3078,12 @@ function _rerenderCachedModels() {
         });
         serveState.backend = serveState.backend || (_detectBackend(m).backend) || 'vllm';
         const launchTarget = _selectedServeTarget(panel);
-        if (serveState.backend === 'llamacpp' && serveState.vision && !/(?:^|\s)(?:--mmproj|--clip_model_path)\b/.test(launchCmd)) {
-          _restoreLaunchBtn();
-          uiModule.showToast('Vision is checked, but no mmproj projector is in the launch command. Refresh cached models after downloading mmproj, or add --mmproj manually.', 8000);
-          return;
-        }
         if (serveState.backend === 'diffusers' && _remoteWindowsDiffusersUnsupported(launchTarget)) {
           _restoreLaunchBtn();
           uiModule.showToast('Diffusers serving is not supported on remote Windows servers yet. Use local Windows or a Linux server.', 9000);
           return;
         }
+
         // Pre-launch: check our own task list for a serve already running
         // on this host. Offer to stop+launch as the default action — the
         // SSH-based port probe below is more thorough but it can miss
@@ -3528,7 +3516,7 @@ async function _deleteCachedModel(repo, itemEl, skipConfirm = false, model = nul
     if (ggufFiles.length > 1) {
       deleteChoice = await _ggufDeleteChoice(repo, ggufFiles);
       if (!deleteChoice) return;
-    } else if (!(await uiModule.styledConfirm(`Delete ${repo} from cache?`, { confirmText: 'Delete', danger: true }))) {
+    } else if (!(await uiModule.styledConfirm(`Delete ${repo} from cache?`, { confirmText: (window.__t || (k=>k))('common.delete'), danger: true }))) {
       return;
     }
   }

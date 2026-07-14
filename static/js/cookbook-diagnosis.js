@@ -1047,7 +1047,7 @@ export async function _runQuickCmd(panel, cmd) {
   const diag = panel.querySelector('.cookbook-diagnosis');
   if (diag) {
     diag.classList.remove('hidden');
-    diag.innerHTML = '<div class="cookbook-diag-message">Running command...</div>';
+    diag.innerHTML = `<div class="cookbook-diag-message">${(window.__t || (k=>k))('cookbook.running', { cmd: fullCmd })}</div>`;
   }
 
   try {
@@ -1068,7 +1068,7 @@ export async function _runQuickCmd(panel, cmd) {
     }
   } catch (e) {
     if (diag) {
-      diag.innerHTML = `<div class="cookbook-diag-message">Command error.</div><div class="cookbook-diag-suggestion">${_diagEsc(e.message)}</div>`;
+      diag.innerHTML = `<div class="cookbook-diag-message">${(window.__t || (k=>k))('common.error')}</div><div class="cookbook-diag-suggestion">${_diagEsc(e.message)}</div>`;
     }
   }
 }

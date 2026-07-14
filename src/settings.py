@@ -4,6 +4,7 @@
 Single source of truth for reading/writing data/settings.json and data/features.json.
 All modules should import from here instead of accessing files directly.
 """
+from __future__ import annotations
 
 import json
 import time
@@ -52,6 +53,7 @@ DEFAULT_SETTINGS = {
     "tts_model": "tts-1",
     "tts_voice": "alloy",
     "tts_speed": "1",
+    "tts_auto_play": False,
     "stt_enabled": False,
     "stt_provider": "disabled",
     "stt_model": "base",
@@ -107,6 +109,9 @@ DEFAULT_SETTINGS = {
     # unbounded model/API bill. Other values are bounded to [60, 86400].
     # Tune via Settings or by editing data/settings.json.
     "research_run_timeout_seconds": 1800,
+    # BookStack integration — external wiki platform
+    "bookstack_url": "",
+    "bookstack_token": "",
     "agent_max_tool_calls": 0,
     "agent_max_rounds": 20,  # per-message agent step cap (clamped 1..200)
     # Soft input-token budget for the agent loop. The DEFAULT value (6000) is the
@@ -156,7 +161,6 @@ DEFAULT_SETTINGS = {
     "utility_model_fallbacks": [],
     "teacher_model": "",
     "teacher_enabled": False,
-    "teacher_tier2_enabled": False,
     # Skills: minimum self-reported confidence for an auto-written (LLM-authored)
     # DRAFT skill to be injected into the agent prompt. Published skills always
     # qualify. Keeps low-confidence auto-skills out of context until they're

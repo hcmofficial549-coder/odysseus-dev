@@ -81,7 +81,7 @@ function _platformIcon(platform) {
   return '';
 }
 
-export let _envState = { env: 'none', envPath: '', hfToken: '', hfTokenConfigured: false, hfTokenMasked: '', gpus: '', remoteHost: '', servers: [], modelPaths: [], platform: '', hostPlatform: '', defaultServer: '' };
+export let _envState = { env: 'none', envPath: '', hfToken: '', hfTokenConfigured: false, hfTokenMasked: '', gpus: '', remoteHost: '', servers: [], modelPaths: [], platform: '', defaultServer: '' };
 let _lastCacheHostVal = null;
 let _cookbookOpeningSpinners = [];
 export function _lastCacheHost() { return _lastCacheHostVal; }
@@ -267,7 +267,7 @@ function _buildServerOpts(excludeLocal = false) {
   // skip that same entry in the loop below — otherwise it appeared twice.
   const _localIdx = _envState.servers.findIndex(_isLocalEntry);
   const _localSrv = _localIdx >= 0 ? _envState.servers[_localIdx] : null;
-  const _localLabel = (_localSrv && _localSrv.name) ? _localSrv.name : 'Local';
+  const _localLabel = (_localSrv && _localSrv.name) ? _localSrv.name : ((window.__t || (k=>k))('cookbook.local'));
   const _localColor = _localSrv ? _resolvedServerColor(_localSrv, _localIdx) : '';
   let html = `<option value="local"${_serverOptionStyle(_localColor)}${!_envState.remoteHost ? ' selected' : ''}>${esc(_serverOptionLabel(_localLabel, _localColor))}</option>`;
   const selectedKey = _envState.remoteServerKey || '';
@@ -276,7 +276,7 @@ function _buildServerOpts(excludeLocal = false) {
     const s = _envState.servers[i];
     if (i === _localIdx) continue;                 // already the synthetic "local" option
     if (excludeLocal && _isLocalEntry(s)) continue;
-    const label = s.name || s.host || `Server ${i + 1}`;
+    const label = s.name || s.host || (window.__t || (k=>k))('cookbook.serverN', {n: i + 1});
     const value = _serverKey(s);
     const color = _resolvedServerColor(s, i);
     let selected = selectedKey ? value === selectedKey : false;
@@ -306,13 +306,8 @@ function _getPort(hostOrTask) {
 
 /** Get platform for a given host (or task object). Returns 'windows', 'termux', 'linux', or '' */
 export function _getPlatform(hostOrTask) {
-  if (hostOrTask === 'local') return _envState.hostPlatform || '';
-  if (!hostOrTask) return _envState.remoteHost ? (_envState.platform || '') : (_envState.hostPlatform || '');
-  if (typeof hostOrTask === 'object') {
-    const taskHost = hostOrTask.remoteServerKey || hostOrTask.remoteHost || '';
-    if (!taskHost || taskHost === 'local') return _envState.hostPlatform || '';
-    return hostOrTask.platform || _getPlatform(taskHost);
-  }
+  if (!hostOrTask) return _envState.platform || '';
+  if (typeof hostOrTask === 'object') return hostOrTask.platform || _getPlatform(hostOrTask.remoteServerKey || hostOrTask.remoteHost);
   const selected = hostOrTask === _envState.remoteHost ? _selectedServer() : null;
   const srv = selected || _serverByVal(hostOrTask);
   return srv?.platform || '';
@@ -348,8 +343,8 @@ function _detectModelOptimizations(modelName) {
   // Hermes/XML guesses, and the MoE backend should default to expert parallel.
   if (_isStepFunStepModel(modelName)) {
     opts.flags.push('--enable-expert-parallel');
-    opts.tips.push('StepFun Step-3 MoE: expert parallel');
-    opts.tips.push('StepFun parser: step3p5 for native tool calls and reasoning tags');
+    opts.tips.push((window.__t || (k=>k))('cookbook.moeExpertParallelStepfun'));
+    opts.tips.push((window.__t || (k=>k))('cookbook.moeParserStepfun'));
   }
   // Qwen3.5 MoE models — MoE-specific env vars + expert-parallel.
   // The --reasoning-parser flag is added uniformly below via
@@ -357,13 +352,13 @@ function _detectModelOptimizations(modelName) {
   else if (n.includes('qwen3.5') || n.includes('qwen3-') && (n.includes('a10b') || n.includes('a22b') || n.includes('a3b'))) {
     opts.envVars.push('VLLM_USE_DEEP_GEMM=0', 'VLLM_USE_FLASHINFER_MOE_FP16=1', 'VLLM_USE_FLASHINFER_SAMPLER=0', 'OMP_NUM_THREADS=4');
     opts.flags.push('--enable-expert-parallel');
-    opts.tips.push('MoE optimizations: expert parallel + flashinfer MoE kernels');
+    opts.tips.push((window.__t || (k=>k))('cookbook.moeFlashinfer'));
   }
   // Qwen3 MoE (non-3.5)
   else if (n.includes('qwen3') && (n.includes('a10b') || n.includes('a22b') || n.includes('a3b'))) {
     opts.envVars.push('VLLM_USE_DEEP_GEMM=0', 'VLLM_USE_FLASHINFER_MOE_FP16=1');
     opts.flags.push('--enable-expert-parallel');
-    opts.tips.push('MoE optimizations: expert parallel');
+    opts.tips.push((window.__t || (k=>k))('cookbook.moeExpertParallelQwen'));
   }
   // DeepSeek MoE — V3 / V3.1 / V4 (and future Vx), R1 / R2 reasoning.
   // Anything v-{integer} or r-{integer} family from DeepSeek is MoE in
@@ -771,12 +766,7 @@ export function _buildServeCmd(f, modelName, backend) {
     // GPU list — read from gpus (button strip); fall back to gpu_id for
     // backward-compat with older saved presets that pre-date the removal.
     const gpuId = (f.gpus || f.gpu_id || '').toString().trim();
-    const _targetHost = Object.prototype.hasOwnProperty.call(f, 'host')
-      ? String(f.host || '').trim()
-      : String(_envState.remoteHost || '').trim();
-    const _isWin = _targetHost ? _isWindows(_targetHost) : _isWindows('local');
-    const _localWindows = _isWin && !_targetHost;
-    const py = _isWin ? 'python' : 'python3';
+    const py = _isWindows() ? 'python' : 'python3';
     // CPU-only serve (-ngl 0): drop the GPU-only flags, otherwise the command
     // mixes "zero GPU layers" with CUDA unified-memory + flash-attn and fails to
     // start (issue #1291). Only affects the ngl=0 path; GPU serving is unchanged.
@@ -798,19 +788,19 @@ export function _buildServeCmd(f, modelName, backend) {
     // with misleading prefixes.
     const _sb = String(_hwfitCache?.system?.backend || '').toLowerCase();
     const _hwfitHost = String(_hwfitCache?._scannedHost || '');
-    const _curHost = _targetHost;
+    const _curHost = String(_envState.remoteHost || '');
     const _isCudaTarget = (_sb === 'cuda') && (_hwfitHost === _curHost);
     const lcPrefix = (() => {
       let p = '';
-      if (f.unified_mem && !_cpuOnly && (!_isWin || _localWindows) && _isCudaTarget) p += `GGML_CUDA_ENABLE_UNIFIED_MEMORY=1 `;
-      // No GPU env var in CPU mode - `-ngl 0` already disables offload
+      if (f.unified_mem && !_cpuOnly && !_isWindows() && _isCudaTarget) p += `GGML_CUDA_ENABLE_UNIFIED_MEMORY=1 `;
+      // No GPU env var in CPU mode — `-ngl 0` already disables offload
       // so CUDA_VISIBLE_DEVICES / HIP_VISIBLE_DEVICES would be misleading
       // clutter ("why is CUDA pinned for a CPU run?").
-      if ((!_isWin || _localWindows) && !_cpuOnly) p += _gpuEnvPrefix(gpuId);
+      if (!_isWindows() && !_cpuOnly) p += _gpuEnvPrefix(gpuId);
       return p;
     })();
-    if (f.unified_mem && !_cpuOnly && _isWin && !_localWindows && _isCudaTarget) cmd += `$env:GGML_CUDA_ENABLE_UNIFIED_MEMORY="1"; `;
-    if (_isWin && !_localWindows && !_cpuOnly) cmd += _gpuEnvPrefix(gpuId, true);
+    if (f.unified_mem && !_cpuOnly && _isWindows() && _isCudaTarget) cmd += `$env:GGML_CUDA_ENABLE_UNIFIED_MEMORY="1"; `;
+    if (_isWindows() && !_cpuOnly) cmd += _gpuEnvPrefix(gpuId, true);
     const needsGgufPrelude = /^\$\(\{\s*find\s/.test(String(ggufPath || ''));
     const modelArg = needsGgufPrelude ? '"$MODEL_FILE"' : `"${ggufPath}"`;
     // Prefer native llama-server. The backend bootstrap resolves/builds the
@@ -882,16 +872,11 @@ export function _buildServeCmd(f, modelName, backend) {
       // llama-cpp-python takes the projector via --clip_model_path.
       _lcpExtra += ` --clip_model_path "${f._mmproj_path}"`;
     }
-    const _lcServer = `${lcPrefix}llama-server --model ${modelArg} --host 0.0.0.0 --port ${f.port || '8080'} -ngl ${f.ngl || '99'} -c ${f.ctx || '8192'}${_lcExtra}`;
-    const _lcpServer = `${lcPrefix}${py} -m llama_cpp.server --model ${modelArg} --host 0.0.0.0 --port ${f.port || '8080'} --n_gpu_layers ${f.ngl || '99'} --n_ctx ${f.ctx || '8192'}${_lcpExtra}`;
-    if (_localWindows) {
-      // Local Windows serve is launched through Git Bash, so use the native
-      // llama-server shape and let PATH resolve the CUDA Release wrapper.
-      cmd += _lcServer;
-    } else if (_isWin) {
+    if (_isWindows()) {
+      const _lcpServer = `${lcPrefix}${py} -m llama_cpp.server --model ${modelArg} --host 0.0.0.0 --port ${f.port || '8080'} --n_gpu_layers ${f.ngl || '99'} --n_ctx ${f.ctx || '8192'}${_lcpExtra}`;
       cmd += _lcpServer;
     } else {
-      cmd += _lcServer;
+      cmd += `${lcPrefix}llama-server --model ${modelArg} --host 0.0.0.0 --port ${f.port || '8080'} -ngl ${f.ngl || '99'} -c ${f.ctx || '8192'}${_lcExtra}`;
     }
     if (needsGgufPrelude) {
       cmd = `MODEL_FILE=${ggufPath} && { [ -n "$MODEL_FILE" ] && [ -f "$MODEL_FILE" ]; } || { echo "ERROR: No GGUF found on this host"; exit 1; } && ${cmd}`;
@@ -1032,11 +1017,11 @@ async function _fetchDependencies() {
     list.appendChild(_spin.element);
     const label = document.createElement('div');
     label.className = 'hwfit-loading';
-    label.textContent = 'Loading packages…';
+    label.textContent = (window.__t || (k=>k))('cookbook.loadingPackages');
     label.style.cssText = 'text-align:center;opacity:0.5;font-size:11px;margin-top:6px;';
     list.appendChild(label);
   } catch {
-    list.innerHTML = '<div class="hwfit-loading">Loading packages...</div>';
+    list.innerHTML = '<div class="hwfit-loading">' + ((window.__t || (k=>k))('cookbook.loadingPackages')) + '</div>';
   }
   try {
     // Resolve the target server from the deps dropdown so remote-target
@@ -1066,28 +1051,29 @@ async function _fetchDependencies() {
     const resp = await fetch('/api/cookbook/packages' + (_pkgParams.toString() ? '?' + _pkgParams.toString() : ''));
     const data = await resp.json();
     const pkgs = data.packages || [];
-    if (!pkgs.length) { list.innerHTML = '<div class="hwfit-loading">No packages found</div>'; return; }
+    if (!pkgs.length) { list.innerHTML = '<div class="hwfit-loading">' + ((window.__t || (k=>k))('cookbook.noPackages')) + '</div>'; return; }
     const _winUnsupported = new Set(['hf_transfer', 'vllm', 'rembg', 'gfpgan']);
     const _systemInstallable = new Set(['tmux']);
 
+    const _t = (k, def) => (window.__t || (kk=>kk))(k) || def;
     const _statusTag = (pkg, isLocal, isSystemDep, winBlocked) => {
-      if (winBlocked) return `<span class="cookbook-dep-tag cookbook-dep-na">N/A</span>`;
-      if (pkg.installed && isSystemDep) return `<span class="cookbook-dep-tag cookbook-dep-installed" title="Found on selected server">Installed</span>`;
+      if (winBlocked) return `<span class="cookbook-dep-tag cookbook-dep-na">${_t('cookbook.na', 'N/A')}</span>`;
+      if (pkg.installed && isSystemDep) return `<span class="cookbook-dep-tag cookbook-dep-installed" title="Found on selected server">${_t('cookbook.installed', 'Installed')}</span>`;
       if (pkg.installed && pkg.pip_update_available === false && pkg.name !== 'llama_cpp') {
         const tip = esc(pkg.update_note || pkg.status_note || 'Found externally; update outside Odysseus.');
-        return `<span class="cookbook-dep-tag cookbook-dep-installed" title="${tip}">Installed</span>`;
+        return `<span class="cookbook-dep-tag cookbook-dep-installed" title="${tip}">${_t('cookbook.installed', 'Installed')}</span>`;
       }
-      if (pkg.installed) return `<button class="cookbook-dep-tag cookbook-dep-installed cookbook-dep-installed-btn" title="Installed — click for actions"><span class="cookbook-dep-installed-label">Installed</span><span class="cookbook-dep-caret">&#9662;</span></button>`;
+      if (pkg.installed) return `<button class="cookbook-dep-tag cookbook-dep-installed cookbook-dep-installed-btn" title="${_t('cookbook.installed', 'Installed')} — click for actions"><span class="cookbook-dep-installed-label">${_t('cookbook.installed', 'Installed')}</span><span class="cookbook-dep-caret">&#9662;</span></button>`;
       if (isSystemDep) {
         const depTip = esc(pkg.install_hint || 'Install this OS package on the selected server.');
         if (pkg.applicable !== false && _systemInstallable.has(pkg.name)) {
-          return `<button type="button" class="cookbook-dep-tag cookbook-dep-install cookbook-dep-install-sysdeps" data-dep-sysdeps="${esc(pkg.name)}" data-dep-target="${isLocal ? 'local' : 'remote'}" title="${depTip}">Install</button>`;
+          return `<button type="button" class="cookbook-dep-tag cookbook-dep-install cookbook-dep-install-sysdeps" data-dep-sysdeps="${esc(pkg.name)}" data-dep-target="${isLocal ? 'local' : 'remote'}" title="${depTip}">${_t('cookbook.install', 'Install')}</button>`;
         }
-        const depLabel = pkg.applicable === false ? 'N/A ?' : 'Missing';
+        const depLabel = pkg.applicable === false ? `${_t('cookbook.na', 'N/A')} ?` : _t('cookbook.missing', 'Missing');
         const depStyle = pkg.name === 'docker' ? ' style="width:87.7px;justify-content:center;"' : '';
         return `<span class="cookbook-dep-tag cookbook-dep-na" title="${depTip}"${depStyle}>${depLabel}</span>`;
       }
-      return `<button class="cookbook-dep-tag cookbook-dep-install" data-dep-pip="${esc(pkg.pip)}" data-dep-target="${isLocal ? 'local' : 'remote'}">Install</button>`;
+      return `<button class="cookbook-dep-tag cookbook-dep-install" data-dep-pip="${esc(pkg.pip)}" data-dep-target="${isLocal ? 'local' : 'remote'}">${_t('cookbook.install', 'Install')}</button>`;
     };
 
     // Per-package inline glyphs — same accent-coloured marks used in the
@@ -1121,9 +1107,9 @@ async function _fetchDependencies() {
       // so the user can watch the pip install in the Running tab.
       let _rebuildBtn = '';
       if (pkg.name === 'vllm' && pkg.installed) {
-        _rebuildBtn = `<button type="button" class="cookbook-dep-tag cookbook-dep-rebuild cookbook-dep-reinstall" data-reinstall-pkg="vllm" title="Force-reinstall vLLM (pulls a matching torch). Runs as a tmux task in the Running tab.">Reinstall</button>`;
+        _rebuildBtn = `<button type="button" class="cookbook-dep-tag cookbook-dep-rebuild cookbook-dep-reinstall" data-reinstall-pkg="vllm" title="Force-reinstall vLLM (pulls a matching torch). Runs as a tmux task in the Running tab.">${_t('cookbook.reinstall', 'Reinstall')}</button>`;
       } else if (pkg.name === 'sglang' && pkg.installed) {
-        _rebuildBtn = `<button type="button" class="cookbook-dep-tag cookbook-dep-rebuild cookbook-dep-reinstall" data-reinstall-pkg="sglang" title="Force-reinstall SGLang (pulls a matching torch). Runs as a tmux task in the Running tab.">Reinstall</button>`;
+        _rebuildBtn = `<button type="button" class="cookbook-dep-tag cookbook-dep-rebuild cookbook-dep-reinstall" data-reinstall-pkg="sglang" title="Force-reinstall SGLang (pulls a matching torch). Runs as a tmux task in the Running tab.">${_t('cookbook.reinstall', 'Reinstall')}</button>`;
       }
       // For backends with a recipe catalog (vllm / sglang / llama_cpp),
       // append a caret button that toggles a per-row recipe panel below.
@@ -1141,7 +1127,7 @@ async function _fetchDependencies() {
       // instead of forcing them out to a shell to apt/pacman/dnf.
       const _bdm = Array.isArray(pkg.build_deps_missing) ? pkg.build_deps_missing : [];
       const _buildDepsBtn = _bdm.length
-        ? `<button type="button" class="cookbook-dep-tag cookbook-dep-install cookbook-dep-install-sysdeps" data-dep-sysdeps="${esc(_bdm.join(','))}" data-dep-target="${isLocal ? 'local' : 'remote'}" title="Install ${esc(_bdm.join(', '))} via the OS package manager on this target (requires passwordless sudo or root).">Install build deps</button>`
+        ? `<button type="button" class="cookbook-dep-tag cookbook-dep-install cookbook-dep-install-sysdeps" data-dep-sysdeps="${esc(_bdm.join(','))}" data-dep-target="${isLocal ? 'local' : 'remote'}" title="Install ${esc(_bdm.join(', '))} via the OS package manager on this target (requires passwordless sudo or root).">${_t('cookbook.installBuildDeps', 'Install build deps')}</button>`
         : '';
       // Render the target-specific install command as a compact mono box
       // when the server resolved it (target's /etc/os-release was readable
@@ -1154,10 +1140,10 @@ async function _fetchDependencies() {
       const _instLabel = (_instCmdOs && _instCmdBe) ? `${_instCmdOs} + ${_instCmdBe}` : (_instCmdOs || _instCmdBe || 'this target');
       const _instCmdBox = _instCmd
         ? `<div class="cookbook-dep-install-cmd" data-dep-cmd="${esc(_instCmd)}" style="margin-top:6px;font-size:10.5px;opacity:0.85;">`
-          + `<div style="opacity:0.65;margin-bottom:2px;">Install on ${esc(_instLabel)}:</div>`
+          + `<div style="opacity:0.65;margin-bottom:2px;">${(window.__t || (k=>k))('cookbook.installOnTarget', {target: esc(_instLabel)})}</div>`
           + `<div style="display:flex;gap:4px;align-items:stretch;">`
           + `<code style="flex:1;padding:4px 6px;background:color-mix(in srgb, var(--fg) 6%, transparent);border:1px solid var(--border);border-radius:4px;font-family:var(--mono, ui-monospace, monospace);font-size:10.5px;white-space:pre-wrap;word-break:break-all;">${esc(_instCmd)}</code>`
-          + `<button type="button" class="cookbook-dep-cmd-copy" data-dep-cmd-copy="${esc(_instCmd)}" title="Copy install command" style="padding:2px 8px;font-size:10px;border:1px solid var(--border);border-radius:4px;background:none;cursor:pointer;color:var(--fg-muted);">Copy</button>`
+          + `<button type="button" class="cookbook-dep-cmd-copy" data-dep-cmd-copy="${esc(_instCmd)}" title="${(window.__t || (k=>k))('cookbook.copy')}" style="padding:2px 8px;font-size:10px;border:1px solid var(--border);border-radius:4px;background:none;cursor:pointer;color:var(--fg-muted);">${(window.__t || (k=>k))('cookbook.copy')}</button>`
           + `</div></div>`
         : '';
       // Partial-state row (replaces the cryptic yellow "Partial ▾" tag).
@@ -1168,9 +1154,9 @@ async function _fetchDependencies() {
       const _gpuWheelCmd = 'CMAKE_ARGS="-DGGML_CUDA=on" python3 -m pip install --user --break-system-packages --force-reinstall --no-cache-dir "llama-cpp-python[server]" --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124';
       const _gpuUpgradeBox = (pkg.partial && pkg.partial_action === 'reinstall_llama_cpp_cuda')
         ? `<div class="cookbook-dep-gpu-upgrade" style="margin-top:6px;font-size:11px;display:flex;align-items:center;gap:6px;flex-wrap:wrap;background:color-mix(in srgb, var(--yellow, #f1fa8c) 14%, transparent);border:1px solid color-mix(in srgb, var(--yellow, #f1fa8c) 40%, var(--border));padding:6px 8px;border-radius:6px;">`
-          + `<span style="flex:1;min-width:160px;">Installed CPU-only — GPU detected on this target. Upgrade for ~10× faster inference.</span>`
-          + `<button type="button" class="cookbook-dep-tag cookbook-dep-install cookbook-dep-install-gpu-wheel" data-dep-target="${isLocal ? 'local' : 'remote'}" data-dep-gpu-cmd="${esc(_gpuWheelCmd)}" style="font-weight:600;">Install GPU wheel</button>`
-          + `<button type="button" class="cookbook-dep-tag cookbook-dep-cmd-copy" data-dep-cmd-copy="${esc(_gpuWheelCmd)}" title="Copy command to clipboard">Copy command</button>`
+          + `<span style="flex:1;min-width:160px;">${(window.__t || (k=>k))('cookbook.installedCpuOnly')}</span>`
+          + `<button type="button" class="cookbook-dep-tag cookbook-dep-install cookbook-dep-install-gpu-wheel" data-dep-target="${isLocal ? 'local' : 'remote'}" data-dep-gpu-cmd="${esc(_gpuWheelCmd)}" style="font-weight:600;">${(window.__t || (k=>k))('cookbook.installGpuWheel')}</button>`
+          + `<button type="button" class="cookbook-dep-tag cookbook-dep-cmd-copy" data-dep-cmd-copy="${esc(_gpuWheelCmd)}" title="${(window.__t || (k=>k))('cookbook.copyCommand')}">${(window.__t || (k=>k))('cookbook.copyCommand')}</button>`
           + `</div>`
         : '';
       return `<div class="cookbook-dep-row${winBlocked ? ' cookbook-dep-blocked' : ''}" data-pkg-name="${esc(pkg.name)}" data-dep-pip="${esc(pkg.pip || '')}" data-dep-target="${isLocal ? 'local' : 'remote'}" data-dep-kind="${esc(pkg.kind || 'python')}">`
@@ -1227,11 +1213,11 @@ async function _fetchDependencies() {
       const rightActive = initialVariant === 'docker' ? ' mode-right' : '';
       return `<div class="cookbook-dep-recipe-panel" data-dep-recipe-panel="${esc(backend)}" data-dep-recipe-active-variant="${esc(initialVariant)}" style="display:none;margin:-4px 0 8px;padding:8px 12px 10px;background:rgba(0,0,0,0.04);border:1px solid var(--border);border-top:none;border-radius:0 0 6px 6px;">
           <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
-            <span style="font-size:11px;opacity:0.75;flex-shrink:0;">Serving which model?</span>
+            <span style="font-size:11px;opacity:0.75;flex-shrink:0;">${(window.__t || (k=>k))('cookbook.servingWhichModel')}</span>
             <select class="settings-select cookbook-dep-recipe-pick" data-dep-recipe-pick="${esc(backend)}" style="flex:1;font-size:11px;padding:3px 6px;">${opts}</select>
             <div class="mode-toggle${rightActive}" data-dep-recipe-variants="${esc(backend)}" style="flex-shrink:0;">
-              <button type="button" class="mode-toggle-btn${initialVariant === 'pip' ? ' active' : ''}" data-dep-recipe-variant="${esc(backend)}" data-variant="pip" aria-pressed="${initialVariant === 'pip'}">Pip/uv</button>
-              <button type="button" class="mode-toggle-btn${initialVariant === 'docker' ? ' active' : ''}" data-dep-recipe-variant="${esc(backend)}" data-variant="docker" aria-pressed="${initialVariant === 'docker'}">Docker</button>
+              <button type="button" class="mode-toggle-btn${initialVariant === 'pip' ? ' active' : ''}" data-dep-recipe-variant="${esc(backend)}" data-variant="pip" aria-pressed="${initialVariant === 'pip'}">${(window.__t || (k=>k))('cookbook.pipuv')}</button>
+              <button type="button" class="mode-toggle-btn${initialVariant === 'docker' ? ' active' : ''}" data-dep-recipe-variant="${esc(backend)}" data-variant="docker" aria-pressed="${initialVariant === 'docker'}">${(window.__t || (k=>k))('cookbook.docker')}</button>
             </div>
           </div>
           <div style="position:relative;">
@@ -1239,7 +1225,7 @@ async function _fetchDependencies() {
             <button type="button" id="recipe-copy-${esc(backend)}" class="cookbook-dep-recipe-copy" data-dep-recipe-copy="${esc(backend)}" title="Copy" aria-label="Copy" style="position:absolute;top:6px;right:6px;padding:3px 5px;background:none;border:none;color:inherit;opacity:0.7;cursor:pointer;display:inline-flex;align-items:center;"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>
           </div>
           <div style="display:flex;gap:6px;justify-content:flex-end;margin-top:6px;">
-            <button type="button" class="cookbook-dep-tag cookbook-dep-install cookbook-dep-recipe-run" data-dep-recipe-run="${esc(backend)}" style="display:inline-flex;align-items:center;gap:4px;cursor:pointer;"><svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>Run</button>
+            <button type="button" class="cookbook-dep-tag cookbook-dep-install cookbook-dep-recipe-run" data-dep-recipe-run="${esc(backend)}" style="display:inline-flex;align-items:center;gap:4px;cursor:pointer;"><svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>${(window.__t || (k=>k))('cookbook.run')}</button>
           </div>
         </div>`;
     }
@@ -1254,8 +1240,8 @@ async function _fetchDependencies() {
     const _serverDeps = pkgs.filter(p => p.target !== 'local');
 
     list.innerHTML = [
-      _viewingRemote ? '' : _section('Odysseus app', 'Run inside the Odysseus app itself.', _appDeps),
-      _section('Server', 'Run on the server chosen above (Local, or a remote box over SSH).', _serverDeps),
+      _viewingRemote ? '' : _section((window.__t || (k=>k))('cookbook.odysseusApp'), 'Run inside the Odysseus app itself.', _appDeps),
+      _section((window.__t || (k=>k))('cookbook.serverLabel'), 'Run on the server chosen above (Local, or a remote box over SSH).', _serverDeps),
     ].join('');
 
     // Shared install/update routine — used by the Install button and the
@@ -1338,7 +1324,7 @@ async function _fetchDependencies() {
           // disappearing before the user could read multi-clause errors
           // like "tmux missing on remote".
           const reason = data.detail || data.error || `HTTP ${res.status}`;
-          uiModule.showToast('Install failed: ' + String(reason).slice(0, 400), {
+          uiModule.showToast((window.__t || (k=>k))('cookbook.installFailed') + ': ' + String(reason).slice(0, 400), {
             duration: 20000,
             action: 'OK',
             onAction: () => {},
@@ -1349,10 +1335,10 @@ async function _fetchDependencies() {
         // model) so the running-task card doesn't offer a "Serve →" button.
         const payload = { repo_id: pipName, _cmd: cmd, remote_host: targetRemoteHost || '', _dep: true, env_path: targetEnvPath || '', platform: targetPlatform || '' };
         _addTask(data.session_id, 'pip ' + pkgName, 'download', payload);
-        if (statusEl) { statusEl.textContent = upgrade ? 'Updating...' : 'Installing...'; statusEl.disabled = true; }
+        if (statusEl) { statusEl.textContent = upgrade ? 'Updating...' : (window.__t || (k=>k))('cookbook.installing'); statusEl.disabled = true; }
         uiModule.showToast(`${upgrade ? 'Updating' : 'Installing'} ${pkgName} on ${targetHost}...`);
       } catch (err) {
-        uiModule.showToast('Install failed: ' + err.message, {
+        uiModule.showToast((window.__t || (k=>k))('cookbook.installFailed') + ': ' + err.message, {
           duration: 20000,
           action: 'OK',
           onAction: () => {},
@@ -1412,12 +1398,12 @@ async function _fetchDependencies() {
             _addTask(data.session_id, 'pip llama-cpp-python[CUDA]', 'download', payload);
             uiModule.showToast(`Reinstalling llama-cpp-python with CUDA wheels on ${targetLabel} (~1-3 min)…`, 4000);
           } else {
-            uiModule.showToast('Upgrade failed: ' + String(data.detail || data.error || `HTTP ${res.status}`).slice(0, 300), {
+            uiModule.showToast((window.__t || (k=>k))('cookbook.upgradeFailed') + ': ' + String(data.detail || data.error || `HTTP ${res.status}`).slice(0, 300), {
               duration: 20000, action: 'OK', onAction: () => {},
             });
           }
         } catch (err) {
-          uiModule.showToast('Upgrade request failed: ' + err.message, { duration: 20000, action: 'OK', onAction: () => {} });
+          uiModule.showToast((window.__t || (k=>k))('cookbook.upgradeFailed') + ': ' + err.message, { duration: 20000, action: 'OK', onAction: () => {} });
         }
       });
     });
@@ -1433,7 +1419,7 @@ async function _fetchDependencies() {
         try { await navigator.clipboard.writeText(cmd); }
         catch { /* fall through */ }
         const orig = btn.textContent;
-        btn.textContent = 'Copied';
+        btn.textContent = (window.__t || (k=>k))('cookbook.copied');
         setTimeout(() => { if (btn.isConnected) btn.textContent = orig; }, 1200);
       });
     });
@@ -1460,7 +1446,7 @@ async function _fetchDependencies() {
         }
         const targetLabel = isLocal ? 'this server' : (_envState.remoteHost || 'remote');
         const origText = btn.textContent;
-        btn.textContent = 'Installing…';
+        btn.textContent = (window.__t || (k=>k))('cookbook.installing');
         btn.disabled = true;
         try {
           const body = { packages: names };
@@ -1485,7 +1471,7 @@ async function _fetchDependencies() {
             // from the row) so the user can copy-paste it without leaving
             // the toast. Otherwise just surface the error.
             const _suffix = _resolvedCmd ? `\n\nRun on ${targetLabel}: ${_resolvedCmd}` : '';
-            uiModule.showToast('System dependency install failed: ' + String(reason).slice(0, 300) + _suffix, {
+            uiModule.showToast((window.__t || (k=>k))('cookbook.buildFailed') + ': ' + String(reason).slice(0, 300) + _suffix, {
               duration: 25000,
               action: _resolvedCmd ? 'Copy command' : 'OK',
               onAction: async () => {
@@ -1498,7 +1484,7 @@ async function _fetchDependencies() {
             btn.disabled = false;
           }
         } catch (err) {
-          uiModule.showToast('Install request failed: ' + err.message, {
+          uiModule.showToast((window.__t || (k=>k))('cookbook.installFailed') + ': ' + err.message, {
             duration: 20000, action: 'OK', onAction: () => {},
           });
           btn.textContent = origText;
@@ -1572,7 +1558,7 @@ async function _fetchDependencies() {
         if (!pre) return;
         try {
           await navigator.clipboard.writeText(pre.textContent);
-          uiModule.showToast('Copied');
+          uiModule.showToast((window.__t || (k=>k))('common.copied'));
         } catch {
           // Fallback for non-secure contexts: select the pre's text so
           // the user can Ctrl+C themselves.
@@ -1623,14 +1609,14 @@ async function _fetchDependencies() {
           });
           const data = await res.json().catch(() => ({}));
           if (!res.ok || !data.ok) {
-            uiModule.showToast('Run failed: ' + String(data.detail || data.error || `HTTP ${res.status}`).slice(0, 200));
+            uiModule.showToast((window.__t || (k=>k))('cookbook.runFailed') + ': ' + String(data.detail || data.error || `HTTP ${res.status}`).slice(0, 200));
             return;
           }
           const payload = { repo_id: `${backend} setup`, _cmd: cmd, remote_host: _envState.remoteHost || '', _dep: true };
           _addTask(data.session_id, `${backend} setup`, 'download', payload);
           uiModule.showToast(`Running ${backend} setup on ${targetHost}…`);
         } catch (err) {
-          uiModule.showToast('Run failed: ' + err.message);
+          uiModule.showToast((window.__t || (k=>k))('cookbook.runFailed') + ': ' + err.message);
         }
       });
     });
@@ -1701,7 +1687,7 @@ async function _fetchDependencies() {
       const upIco = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2v6h-6"/><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M3 22v-6h6"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/></svg>';
       const it = document.createElement('div');
       it.className = 'dropdown-item-compact';
-      it.innerHTML = `<span class="dropdown-icon">${upIco}</span><span>Update</span>`;
+      it.innerHTML = `<span class="dropdown-icon">${upIco}</span><span>${(window.__t || (k=>k))('cookbook.update')}</span>`;
       it.title = `Update ${pkgName} to the latest version (pip install -U)`;
       it.addEventListener('click', async (e) => {
         e.stopPropagation();
@@ -1713,7 +1699,7 @@ async function _fetchDependencies() {
         const rebuildIco = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>';
         const rebuild = document.createElement('div');
         rebuild.className = 'dropdown-item-compact';
-        rebuild.innerHTML = `<span class="dropdown-icon">${rebuildIco}</span><span>Rebuild</span>`;
+        rebuild.innerHTML = `<span class="dropdown-icon">${rebuildIco}</span><span>${(window.__t || (k=>k))('cookbook.rebuild')}</span>`;
         rebuild.title = 'Clear the cached llama-server build so the next launch rebuilds it.';
         rebuild.addEventListener('click', async (e) => {
           e.stopPropagation();
@@ -1723,7 +1709,7 @@ async function _fetchDependencies() {
         dropdown.appendChild(rebuild);
         const source = document.createElement('div');
         source.className = 'dropdown-item-compact';
-        source.innerHTML = `<span class="dropdown-icon">${upIco}</span><span>Update source + rebuild</span>`;
+        source.innerHTML = `<span class="dropdown-icon">${upIco}</span><span>${(window.__t || (k=>k))('cookbook.update')} + ${(window.__t || (k=>k))('cookbook.rebuild')}</span>`;
         source.title = 'Fast-forward ~/llama.cpp when possible, then clear the cached build.';
         source.addEventListener('click', async (e) => {
           e.stopPropagation();
@@ -1747,7 +1733,7 @@ async function _fetchDependencies() {
       });
     });
   } catch (err) {
-    list.innerHTML = `<div class="hwfit-loading">Error loading packages: ${esc(err.message)}</div>`;
+    list.innerHTML = `<div class="hwfit-loading">` + (window.__t || (k=>k))('cookbook.loadFailed', {error: esc(err.message)}) + `</div>`;
   }
 }
 
@@ -2130,7 +2116,7 @@ function _wireTabEvents(body) {
 
     document.getElementById('serve-bulk-cancel')?.addEventListener('click', () => {
       selectBtn.classList.remove('active');
-      selectBtn.textContent = 'Select';  // reset label so the button doesn't stay reading "Cancel" after exit
+      selectBtn.textContent = (window.__t || (k=>k))('memory.select');  // reset label so the button doesn't stay reading "Cancel" after exit
       bulkBar.classList.add('hidden');
       document.querySelectorAll('.serve-select-cb').forEach(dot => { dot.style.display = 'none'; dot.classList.remove('selected'); });
     });
@@ -2143,13 +2129,13 @@ function _wireTabEvents(body) {
         const item = dot.closest('.memory-item[data-repo]');
         if (item?.dataset.repo) repos.push(item.dataset.repo);
       });
-      if (!(await uiModule.styledConfirm(`Delete ${repos.length} model(s)? This removes cached files.`, { confirmText: 'Delete', danger: true }))) return;
+      if (!(await uiModule.styledConfirm(`Delete ${repos.length} model(s)? This removes cached files.`, { confirmText: (window.__t || (k=>k))('common.delete'), danger: true }))) return;
       for (const repo of repos) {
         const item = document.querySelector(`.memory-item[data-repo="${repo}"]`);
         if (item) await _deleteCachedModel(repo, item, true);
       }
       selectBtn.classList.remove('active');
-      selectBtn.textContent = 'Select';  // same reset as bulk-cancel
+      selectBtn.textContent = (window.__t || (k=>k))('memory.select');  // same reset as bulk-cancel
       bulkBar.classList.add('hidden');
       document.querySelectorAll('.serve-select-cb').forEach(dot => { dot.style.display = 'none'; dot.classList.remove('selected'); });
     });
@@ -2234,7 +2220,7 @@ function _wireTabEvents(body) {
         return false;
       }
       dlGgufRow.style.display = 'flex';
-      dlGgufQuant.innerHTML = '<option value="">Scanning...</option>';
+      dlGgufQuant.innerHTML = '<option value="">' + ((window.__t || (k=>k))('cookbook.scanning')) + '</option>';
       dlGgufQuant.dataset.repo = repo;
       dlGgufNote.textContent = '';
       try {
@@ -2519,7 +2505,7 @@ function _wireTabEvents(body) {
         lbl.style.cssText = 'text-align:center;opacity:0.5;font-size:11px;margin-top:6px;';
         hfList.appendChild(lbl);
       } catch {
-        hfList.innerHTML = '<div class="hwfit-loading">Scanning models…</div>';
+        hfList.innerHTML = '<div class="hwfit-loading">' + ((window.__t || (k=>k))('cookbook.scanningModels')) + '</div>';
       }
       const hwInfo = await _getSelectedServerHw();
       const vram = hwInfo.vram || 0;
@@ -2573,7 +2559,7 @@ function _wireTabEvents(body) {
           });
         });
       } catch (e) {
-        hfList.innerHTML = '<div class="hwfit-loading">Failed to load</div>';
+        hfList.innerHTML = '<div class="hwfit-loading">' + ((window.__t || (k=>k))('cookbook.failedToLoad')) + '</div>';
       }
     }
     hfToggle.addEventListener('click', () => {
@@ -2623,7 +2609,7 @@ function _wireTabEvents(body) {
         const data = await res.json();
         const models = data.models || [];
         if (!models.length) {
-          olList.innerHTML = '<div class="hwfit-loading">No models</div>';
+          olList.innerHTML = '<div class="hwfit-loading">' + ((window.__t || (k=>k))('cookbook.noModels')) + '</div>';
           return;
         }
         let html = '';
@@ -2662,7 +2648,7 @@ function _wireTabEvents(body) {
           });
         });
       } catch (e) {
-        olList.innerHTML = '<div class="hwfit-loading">Failed to load</div>';
+        olList.innerHTML = '<div class="hwfit-loading">' + ((window.__t || (k=>k))('cookbook.failedToLoad')) + '</div>';
       }
     }
     olToggle.addEventListener('click', () => {
@@ -2714,7 +2700,7 @@ function _wireTabEvents(body) {
           hfInput.parentNode.insertBefore(check, hfInput);
         }
         const flash = document.createElement('span');
-        flash.textContent = 'Saved';
+        flash.textContent = (window.__t || (k=>k))('settings.saved');
         flash.style.cssText = 'margin-left:8px;font-size:11px;color:var(--green,#50fa7b);opacity:0;transition:opacity 0.18s;flex-shrink:0;position:relative;top:1px;';
         hfInput.parentNode.appendChild(flash);
         requestAnimationFrame(() => { flash.style.opacity = '1'; });
@@ -2832,10 +2818,10 @@ function _renderRecipes() {
 
   // Tabs
   html += '<div class="cookbook-tabs">';
-  html += '<button class="cookbook-tab" data-backend="Serve"><svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" stroke="none" style="vertical-align:-1px;margin-right:3px;"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>Launch</button>';
-  html += '<button class="cookbook-tab active" data-backend="Search"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="vertical-align:-1px;margin-right:3px;"><polyline points="7 14 12 19 17 14"/><line x1="12" y1="19" x2="12" y2="5"/><line x1="5" y1="21" x2="19" y2="21"/></svg>Download</button>';
-  html += '<button class="cookbook-tab" data-backend="Dependencies"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="vertical-align:-1px;margin-right:3px;"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>Dependencies</button>';
-  html += '<button class="cookbook-tab" data-backend="Settings"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="vertical-align:-1px;margin-right:3px;"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>Settings</button>';
+  html += '<button class="cookbook-tab" data-backend="Serve"><svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" stroke="none" style="vertical-align:-1px;margin-right:3px;"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>' + (window.__t || (k=>k))('cookbook.launch') + '</button>';
+  html += '<button class="cookbook-tab active" data-backend="Search"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="vertical-align:-1px;margin-right:3px;"><polyline points="7 14 12 19 17 14"/><line x1="12" y1="19" x2="12" y2="5"/><line x1="5" y1="21" x2="19" y2="21"/></svg>' + (window.__t || (k=>k))('cookbook.download') + '</button>';
+  html += '<button class="cookbook-tab" data-backend="Dependencies"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="vertical-align:-1px;margin-right:3px;"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>' + (window.__t || (k=>k))('cookbook.dependencies') + '</button>';
+  html += '<button class="cookbook-tab" data-backend="Settings"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="vertical-align:-1px;margin-right:3px;"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>' + (window.__t || (k=>k))('cookbook.settings') + '</button>';
   html += '</div>';
 
   // Search group
@@ -2846,10 +2832,10 @@ function _renderRecipes() {
   // State persisted to localStorage so the fold survives reloads.
   const _dlTabFolded = (() => { try { return localStorage.getItem('cookbook_dl_tab_folded_v1') === '1'; } catch { return false; } })();
   html += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:2px;">';
-  html += `<h2 id="cookbook-dl-tab-fold" class="${_dlTabFolded ? 'is-folded' : ''}" style="margin:0;padding:0;line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:space-between;user-select:none;flex:1;">Direct Download<span id="cookbook-dl-tab-chevron" style="display:inline-block;transition:transform 0.15s;font-size:1.1em;margin-left:8px;opacity:0.85;">${_dlTabFolded ? '▸' : '▾'}</span></h2>`;
+  html += `<h2 id="cookbook-dl-tab-fold" class="${_dlTabFolded ? 'is-folded' : ''}" style="margin:0;padding:0;line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:space-between;user-select:none;flex:1;">${(window.__t || (k=>k))('cookbook.directDownload')}<span id="cookbook-dl-tab-chevron" style="display:inline-block;transition:transform 0.15s;font-size:1.1em;margin-left:8px;opacity:0.85;">${_dlTabFolded ? '▸' : '▾'}</span></h2>`;
   html += '</div>';
   html += `<div id="cookbook-dl-tab-fold-body" class="${_dlTabFolded ? 'is-folded' : ''}">`;
-  html += '<p class="memory-desc doclib-desc" style="margin-top:6px;">Download from <a href="https://huggingface.co/models" target="_blank" rel="noopener" style="color:var(--accent,var(--red));text-decoration:none;"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:1px;"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>HuggingFace</a> by pasting model link, or download directly in the Scan section below.</p>';
+  html += '<p class="memory-desc doclib-desc" style="margin-top:6px;">' + (window.__t || (k=>k))('cookbook.directDownloadDesc') + '</p>';
   html += '<div class="hwfit-container" id="hwfit-container">';
 
   // Section 1: Settings
@@ -2860,14 +2846,13 @@ function _renderRecipes() {
     const isLocal = !s.host || s.host.toLowerCase() === 'local';
     if (isLocal) {
       s.host = '';
-      s.platform = _envState.hostPlatform || '';
       if (_localSeen) return false;
       _localSeen = true;
     }
     return true;
   });
   if (!_localSeen) {
-    _es.servers.unshift({ host: '', env: _es.env || 'none', envPath: _es.envPath || '', modelDir: '~/.cache/huggingface/hub', platform: _envState.hostPlatform || '' });
+    _es.servers.unshift({ host: '', env: _es.env || 'none', envPath: _es.envPath || '', modelDir: '~/.cache/huggingface/hub' });
   }
   if (_es.remoteHost && !_es.servers.some(s => s.host === _es.remoteHost)) {
     _es.servers.push({ host: _es.remoteHost, env: _es.env || 'none', envPath: _es.envPath || '', modelDir: '~/.cache/huggingface/hub' });
@@ -2890,7 +2875,7 @@ function _renderRecipes() {
     html += `<input type="hidden" id="hwfit-dl-server" value="local" />`;
   }
   html += `<input type="text" class="cookbook-dl-repo" id="cookbook-dl-repo" placeholder="org/model-name, qwen2.5:14b, or HF URL" style="flex:1;min-width:0;" />`;
-  html += `<button class="cookbook-btn cookbook-dl-btn" id="cookbook-dl-btn">Download</button>`;
+  html += `<button class="cookbook-btn cookbook-dl-btn" id="cookbook-dl-btn">${(window.__t || (k=>k))('cookbook.download')}</button>`;
   html += `</div>`;
   html += `<div id="cookbook-dl-gguf-row" class="cookbook-dl-gguf-row" style="display:none;">`;
   html += `<span class="cookbook-dl-gguf-label">GGUF</span>`;
@@ -2922,9 +2907,9 @@ function _renderRecipes() {
   html += '<div class="cookbook-group" data-backend-group="Search">';
   html += '<div class="admin-card" style="flex:1;display:flex;flex-direction:column;overflow:hidden;">';
   html += '<div style="display:flex;align-items:baseline;gap:8px;margin-bottom:2px;">';
-  html += '<h2 style="margin:0;padding:0;line-height:1;">Scan / Download</h2>';
+  html += `<h2 style="margin:0;padding:0;line-height:1;">${(window.__t || (k=>k))('cookbook.scanDownload')}</h2>`;
   html += '</div>';
-  html += '<p class="memory-desc doclib-desc" style="margin-top:6px;">Scans your hardware for what models you can run. Hardware is cached; hit the scan button to re-probe after changing GPUs.</p>';
+  html += `<p class="memory-desc doclib-desc" style="margin-top:6px;">${(window.__t || (k=>k))('cookbook.scanDesc')}</p>`;
   html += '<div class="hwfit-toolbar" style="margin-top:9px;">';
   html += '<select class="cookbook-field-input hwfit-usecase" id="hwfit-usecase" style="height:28px;">';
   html += '<option value="general" selected>Standard</option>';
@@ -3052,7 +3037,7 @@ function _renderRecipes() {
   html += '<div class="cookbook-group hidden" data-backend-group="Dependencies">';
   html += '<div class="admin-card" style="flex:1;display:flex;flex-direction:column;overflow:hidden;">';
   html += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">';
-  html += '<h2 style="margin:0;padding:0;line-height:1;">Dependencies</h2>';
+  html += `<h2 style="margin:0;padding:0;line-height:1;">${(window.__t || (k=>k))('cookbook.dependencies')}</h2>`;
   // Rebuild llama.cpp button moved into the llama_cpp dep row (see _depRow);
   // having it in the title polluted the section header.
   html += '<span style="font-size:10px;opacity:0.5;margin-left:auto;">Server</span>';
@@ -3060,7 +3045,7 @@ function _renderRecipes() {
   html += _buildServerOpts(false);
   html += '</select>';
   html += '</div>';
-  html += '<p class="memory-desc doclib-desc">Optional packages that extend Odysseus capabilities.</p>';
+  html += `<p class="memory-desc doclib-desc">${(window.__t || (k=>k))('cookbook.dependenciesDesc')}</p>`;
   html += '<div class="doclib-grid" id="cookbook-deps-list"></div>';
   html += '</div></div>';
 
@@ -3073,9 +3058,9 @@ function _renderRecipes() {
   // ── HuggingFace Token block ─────────────────────────────────────────
   html += '<div class="admin-card" style="flex:0 0 auto;display:flex;flex-direction:column;">';
   html += '<div style="display:flex;align-items:baseline;gap:8px;margin-bottom:2px;">';
-  html += '<h2 style="margin:0;padding:0;line-height:1;">HuggingFace Token</h2>';
+  html += `<h2 style="margin:0;padding:0;line-height:1;">${(window.__t || (k=>k))('cookbook.huggingfaceToken')}</h2>`;
   html += '</div>';
-  html += '<p class="memory-desc doclib-desc">Personal access token for downloading gated and private models.</p>';
+  html += `<p class="memory-desc doclib-desc">${(window.__t || (k=>k))('cookbook.hfTokenDesc')}</p>`;
   html += '<div class="memory-toolbar">';
   html += `<div style="display:flex;gap:4px;align-items:center;">`;
   // Bold green check shown when a token is stored (a placeholder can't style a
@@ -3094,12 +3079,12 @@ function _renderRecipes() {
   // ── Servers block ───────────────────────────────────────────────────
   html += '<div class="admin-card" style="flex:0 0 auto;display:flex;flex-direction:column;">';
   html += '<div style="display:flex;align-items:baseline;gap:8px;margin-bottom:2px;margin-top:-4px;">';
-  html += '<h2 style="margin:0;padding:0;line-height:1;">Servers</h2>';
+  html += `<h2 style="margin:0;padding:0;line-height:1;">${(window.__t || (k=>k))('cookbook.servers')}</h2>`;
   // Reuse the calendar +New pill: spinning plus, label fades in idea uses
    // the same `.cal-add-btn-text` rules, so styling stays consistent.
   html += '<button class="cal-add-btn cal-add-btn-text" id="cookbook-server-add" title="Add server" style="margin-left:auto;"><span class="cal-add-plus">+</span><span class="cal-add-label">Add</span></button>';
   html += '</div>';
-  html += '<p class="memory-desc doclib-desc">Configure SSH servers, install Odysseus keys, choose model directories, and set the default server. Local is this machine.</p>';
+  html += `<p class="memory-desc doclib-desc">${(window.__t || (k=>k))('cookbook.serversDesc')}</p>`;
   html += '<div class="memory-toolbar cookbook-servers-toolbar" style="margin-top:4px;">';
   html += `<div id="cookbook-servers-list">`;
   for (let i = 0; i < _es.servers.length; i++) {
