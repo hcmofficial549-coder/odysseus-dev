@@ -72,6 +72,25 @@ def _normalize_sqlite_url(url: str) -> str:
 # Get database URL from environment, default to SQLite in DATA_DIR
 DATABASE_URL = _normalize_sqlite_url(os.getenv("DATABASE_URL", _default_database_url()))
 
+
+def _ensure_sqlite_parent_dir(database_url: str) -> None:
+    try:
+        url = make_url(database_url)
+    except Exception:
+        return
+    if url.get_backend_name() != "sqlite":
+        return
+    db_path = url.database
+    if not db_path or db_path == ":memory:" or db_path.startswith("file:"):
+        return
+    parent = os.path.dirname(os.path.abspath(db_path))
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+
+
+_ensure_sqlite_parent_dir(DATABASE_URL)
+
+
 # Create engine
 engine = create_engine(
     DATABASE_URL,
