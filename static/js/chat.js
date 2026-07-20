@@ -28,6 +28,60 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
   const DEFAULT_TIMEOUT_MS = 120000;
   const RESEARCH_SVG = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>';
 
+  // ── DOM memory guard ──
+  // Long agent runs can create thousands of DOM nodes (one per tool call +
+  // text bubble). Without a cap the browser tab bloats to multiple GB and
+  // freezes. Instead of deleting old messages (which erases the visual
+  // timeline), we collapse them into lightweight placeholders that preserve
+  // the conversation shape while freeing 95%+ of the DOM memory. The full
+  // history lives on the server and is re-fetched on session switch.
+  var MAX_CHAT_DOM_NODES = 150;
+  (function _initMaxDomNodes() {
+    var box = document.getElementById('chat-history');
+    if (box) {
+      var attr = parseInt(box.getAttribute('data-max-dom-nodes'), 10);
+      if (attr > 0) MAX_CHAT_DOM_NODES = attr;
+    }
+  })();
+
+  function _trimChatHistoryDOM() {
+    var box = document.getElementById('chat-history');
+    if (!box) return;
+    var children = box.children;
+    if (children.length <= MAX_CHAT_DOM_NODES) return;
+    var keepFloor = Math.min(20, Math.floor(MAX_CHAT_DOM_NODES / 4));
+
+    // Remove the oldest children until we're under the cap. The scroll-based
+    // pager in sessions.js handles re-fetching older messages on demand.
+    var maxIdx = Math.max(0, children.length - keepFloor);
+    for (var i = 0; i < maxIdx && children.length > MAX_CHAT_DOM_NODES; i++) {
+      var el = children[i];
+      if (!el) break;
+
+      // Tear down any per-node intervals
+      if (el._waveInterval) { clearInterval(el._waveInterval); el._waveInterval = null; }
+      if (el._elapsedTicker) { clearInterval(el._elapsedTicker); el._elapsedTicker = null; }
+      if (el._spinner) { try { el._spinner.destroy(); } catch (_) {} }
+      el.querySelectorAll('.agent-thread-node').forEach(function(n) {
+        if (n._waveInterval) { clearInterval(n._waveInterval); n._waveInterval = null; }
+        if (n._elapsedTicker) { clearInterval(n._elapsedTicker); n._elapsedTicker = null; }
+      });
+      el.querySelectorAll('img[src^="data:"]').forEach(function(img) {
+        img.src = '';
+      });
+      // Also clear data-URI background images in inline styles
+      var bg = el.style && el.style.backgroundImage;
+      if (bg && bg.indexOf('url("data:') === 0) {
+        el.style.backgroundImage = '';
+      } else if (bg && bg.indexOf("url('data:") === 0) {
+        el.style.backgroundImage = '';
+      }
+
+      el.remove();
+      i--; // children shifted, re-check this index
+    }
+  }
+
   let API_BASE = '';
   let currentAbort = null;
   let isStreaming = false;
@@ -263,6 +317,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
   let currentSpinner = null; // Track current spinner for stop cleanup
 
   // Background streaming support
+  const MAX_BACKGROUND_STREAMS = 10;
   const _backgroundStreams = new Map(); // sessionId -> { status, accumulated, sourcesHtml, abortCtrl, query, metrics }
   const _resumingStreams = new Set();   // sessionId -> a resumeStream() reader is live (re-attach lock)
   let _streamSessionId = null; // Session ID for the currently active reader loop
@@ -275,6 +330,36 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
   function hasActiveStream(sessionId) {
     return _streamSessionId === sessionId || _backgroundStreams.has(sessionId) ||
            _resumingStreams.has(sessionId);
+  }
+
+  /** Purge completed/error background stream entries that are no longer needed. */
+  function _purgeStaleBackgroundStreams() {
+    _backgroundStreams.forEach(function(entry, sid) {
+      if (entry.status === 'completed' || entry.status === 'error') {
+        // Release any held resources before deleting
+        if (entry.abortCtrl) { entry.abortCtrl = null; }
+        entry.accumulated = '';
+        entry.sourcesHtml = '';
+        entry.findingsData = null;
+        entry.metrics = null;
+        _backgroundStreams.delete(sid);
+      }
+    });
+    // Evict oldest entries when the map exceeds the cardinality cap.
+    // This bounds memory for abandoned streams that never completed.
+    while (_backgroundStreams.size > MAX_BACKGROUND_STREAMS) {
+      var oldestKey = _backgroundStreams.keys().next().value;
+      if (oldestKey === undefined) break;
+      var oldest = _backgroundStreams.get(oldestKey);
+      if (oldest) {
+        if (oldest.abortCtrl) { try { oldest.abortCtrl.abort(); } catch (_) {} oldest.abortCtrl = null; }
+        oldest.accumulated = '';
+        oldest.sourcesHtml = '';
+        oldest.findingsData = null;
+        oldest.metrics = null;
+      }
+      _backgroundStreams.delete(oldestKey);
+    }
   }
 
   // Sources box builder and toggleSources are now in chatRenderer.js
@@ -579,6 +664,8 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
    */
   export async function handleChatSubmit(e) {
     e.preventDefault();
+    // Purge stale background stream entries to free accumulated text
+    _purgeStaleBackgroundStreams();
     // Cancel research clarification timeout if active
     if (window._researchTimeoutTimer) {
       clearTimeout(window._researchTimeoutTimer);
@@ -1327,6 +1414,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
         researchBtn.classList.remove('active');
       }
       box.appendChild(holder);
+      _trimChatHistoryDOM();
       uiModule.scrollHistory();
 
       const enableResearchBtn = () => {
@@ -1537,6 +1625,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
         _thinkMsg._spinner = _ts;
         _thinkMsg.appendChild(_thinkBody);
         document.getElementById('chat-history').appendChild(_thinkMsg);
+        _trimChatHistoryDOM();
         uiModule.scrollHistory();
       }
 
@@ -1569,6 +1658,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       let _liveThinkSpinnerSlot = null;
       let _liveThinkTimerEl = null;
       let _liveThinkTokenCount = 0;
+      let _thinkRenderTimer = null;
       let _liveThinkToggle = null;
       let _liveThinkDomId = null;
 
@@ -1755,6 +1845,12 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                   } catch (toastErr) {
                     console.warn('[bg-stream] Toast/notification error:', toastErr);
                   }
+                  // Free the large accumulated text — only the status and query
+                  // are needed now; checkBackgroundStream reloads from the DB.
+                  bgDone.accumulated = '';
+                  bgDone.sourcesHtml = '';
+                  bgDone.abortCtrl = null;
+                  _purgeStaleBackgroundStreams();
                 }
                 // CRITICAL: always mark stream complete for the sidebar dot
                 try {
@@ -2003,18 +2099,22 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                   }
                 } else if (hasUnclosedThink && isThinking) {
                   if (_liveThinkInner) {
-                    // Extract raw thinking text (strip known thinking wrappers and prefixes)
-                    var thinkText = markdownModule.normalizeThinkingMarkup(_streamDisplayText(roundText))
-                      .replace(/<\/?(?:think(?:ing)?|thought)(?:\s+[^>]*)?>/gi, '')
-                      .replace(/<\|channel>thought\s*\n?/gi, '')
-                      .replace(/<\|channel>response\s*\n?/gi, '')
-                      .replace(/<channel\|>/gi, '');
-                    thinkText = thinkText.replace(/^\s*Thinking(?:\s+Process)?:\s*/i, '');
-                    _liveThinkTokenCount = _estimateThinkingTokens(thinkText);
-                    _liveThinkInner.innerHTML = markdownModule.mdToHtml(thinkText);
-                    if (_liveThinkTimerEl) {
-                      var _elapsedLive = thinkingStartTime ? ((Date.now() - thinkingStartTime) / 1000).toFixed(1) : '';
-                      _liveThinkTimerEl.textContent = _formatThinkStats(_elapsedLive, _liveThinkTokenCount);
+                    // Debounce expensive regex processing — O(n) per-char on
+                    // growing text. A single rich render happens when the
+                    // thinking block closes. Between ticks, raw text
+                    // accumulates without triggering the regex chain.
+                    if (!_thinkRenderTimer) {
+                      _thinkRenderTimer = setTimeout(function() {
+                        _thinkRenderTimer = null;
+                        if (!_liveThinkInner || !isThinking) return;
+                        var thinkText = markdownModule.normalizeThinkingMarkup(_streamDisplayText(roundText))
+                          .replace(/<\/?(?:think(?:ing)?|thought)(?:\s+[^>]*)?>/gi, '')
+                          .replace(/<\|channel>thought\s*\n?/gi, '')
+                          .replace(/<\|channel>response\s*\n?/gi, '')
+                          .replace(/<channel\|>/gi, '');
+                        thinkText = thinkText.replace(/^\s*Thinking(?:\s+Process)?:\s*/i, '');
+                        _liveThinkInner.textContent = thinkText;
+                      }, 200);
                     }
                     // Keep thinking box scrolled to bottom, but let user scroll up
                     var _followThinking = true;
@@ -2028,6 +2128,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                   if (_followThinking) uiModule.scrollHistory();
                   continue;
                 } else if (!hasUnclosedThink && isThinking) {
+                  if (_thinkRenderTimer) { clearTimeout(_thinkRenderTimer); _thinkRenderTimer = null; }
                   isThinking = false;
                   var _thinkTextLen = _liveThinkInner ? _liveThinkInner.textContent.trim().length : 0;
 
@@ -2054,6 +2155,14 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                   // Thinking ended — smooth transition: update header, pause, then collapse
                   // Stop live timer and spinner
                   cancelAnimationFrame(_thinkTimerRAF);
+                  // Replace plain-text with a single rich markdown render now that
+                  // the thinking block is complete.
+                  if (_liveThinkInner) {
+                    var _finalThinkText = _liveThinkInner.textContent;
+                    _liveThinkInner.style.whiteSpace = '';
+                    _liveThinkInner.style.fontFamily = '';
+                    _liveThinkInner.innerHTML = markdownModule.mdToHtml(_finalThinkText);
+                  }
                   var elapsed = thinkingStartTime ? ((Date.now() - thinkingStartTime) / 1000).toFixed(1) : null;
                   // Embed thinking time in the <think> tag for persistence on reload
                   if (elapsed) {
@@ -2538,6 +2647,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                     threadWrap.classList.add('has-top');
                   }
                   chatBox.appendChild(threadWrap);
+                  _trimChatHistoryDOM();
                 }
                 threadWrap.classList.add('streaming');
                 lastToolThread = threadWrap;
@@ -2830,6 +2940,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 newBody.className = 'body';
                 newWrap.appendChild(newBody);
                 box.appendChild(newWrap);
+                _trimChatHistoryDOM();
                 roundHolder = newWrap;
                 roundText = '';
                 // Destroy any previous spinner before creating new one
@@ -5426,6 +5537,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
     continueFrom,
     _appendViewReportLink,
     hasActiveStream,
+    trimChatHistoryDOM: _trimChatHistoryDOM,
   };
 
   // Single delegated handler for tool-call fold/expand. One listener on
