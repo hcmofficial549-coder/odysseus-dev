@@ -51,6 +51,30 @@ _ENDPOINT_FALLBACK_FIELDS = {
     "vision_model_fallbacks":  "Vision Model Fallbacks",
 }
 
+_REASONING_EFFORT_TYPE_FLOAT = "float"
+
+
+def _normalize_reasoning_effort_type(value: Any) -> Optional[str]:
+    """Validate endpoint reasoning metadata without model-name inference."""
+    if value is None or str(value).strip().lower() in ("", "none", "default"):
+        return None
+    normalized = str(value).strip().lower()
+    if normalized != _REASONING_EFFORT_TYPE_FLOAT:
+        raise HTTPException(400, "reasoning_effort_type must be 'float' or null")
+    return normalized
+
+
+def _normalize_reasoning_effort(value: Any) -> Optional[float]:
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    try:
+        normalized = float(value)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "reasoning_effort must be a number in [0.0, 0.99]")
+    if not 0.0 <= normalized <= 0.99:
+        raise HTTPException(400, "reasoning_effort must be in [0.0, 0.99]")
+    return normalized
+
 
 def _speech_settings_using_endpoint(settings: dict, ep_id: str) -> list:
     """Return speech settings that reference a model endpoint."""
@@ -1914,6 +1938,8 @@ def setup_model_routes(model_discovery):
                     "ping_error": (ping or {}).get("error") if ping else None,
                     "model_type": getattr(r, "model_type", None) or "llm",
                     "supports_tools": getattr(r, "supports_tools", None),
+                    "reasoning_effort_type": getattr(r, "reasoning_effort_type", None),
+                    "reasoning_effort": getattr(r, "reasoning_effort", None),
                     "endpoint_kind": kind,
                     "category": _classify_endpoint(base, kind),
                     "model_refresh_mode": _endpoint_refresh_mode(r, kind),
@@ -2459,6 +2485,15 @@ def setup_model_routes(model_discovery):
                 if "supports_tools" in body:
                     v = body["supports_tools"]
                     ep.supports_tools = {True: True, False: False, 'true': True, 'false': False, 1: True, 0: False}.get(v)
+                if "reasoning_effort_type" in body:
+                    ep.reasoning_effort_type = _normalize_reasoning_effort_type(body.get("reasoning_effort_type"))
+                    if ep.reasoning_effort_type is None:
+                        ep.reasoning_effort = None
+                if "reasoning_effort" in body:
+                    effort = _normalize_reasoning_effort(body.get("reasoning_effort"))
+                    if effort is not None and getattr(ep, "reasoning_effort_type", None) != _REASONING_EFFORT_TYPE_FLOAT:
+                        raise HTTPException(400, "reasoning_effort_type='float' is required")
+                    ep.reasoning_effort = effort
                 if "is_enabled" in body:
                     v_ie = body['is_enabled']
                     ep.is_enabled = v_ie.lower() in ('true', '1', 'yes') if isinstance(v_ie, str) else bool(v_ie)
@@ -2508,6 +2543,8 @@ def setup_model_routes(model_discovery):
                 "id": ep.id,
                 "is_enabled": ep.is_enabled,
                 "supports_tools": ep.supports_tools,
+                "reasoning_effort_type": getattr(ep, "reasoning_effort_type", None),
+                "reasoning_effort": getattr(ep, "reasoning_effort", None),
                 "name": ep.name,
                 "model_type": ep.model_type,
                 "base_url": ep.base_url,
