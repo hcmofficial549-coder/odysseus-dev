@@ -58,7 +58,7 @@ async def _cookbook_servers() -> Dict[str, Any]:
                 "platform": s.get("platform") or "",
                 "env": s.get("env") or "",
                 "envPath": s.get("envPath") or "",
-                "port": s.get("port") or "",
+                "port": s.get("port") or s.get("sshPort") or "",
             })
     return {"default_host": env.get("remoteHost") or "", "hosts": hosts}
 
@@ -130,7 +130,13 @@ async def _cookbook_env_for_host(host: str) -> Dict[str, Any]:
     env_kind = per_host.get("env") or env_root.get("env") or "none"
     env_path = per_host.get("envPath") or env_root.get("envPath") or ""
     platform = per_host.get("platform") or env_root.get("platform") or "linux"
-    ssh_port = per_host.get("sshPort") or env_root.get("sshPort") or ""
+    ssh_port = (
+        per_host.get("sshPort")
+        or per_host.get("port")
+        or env_root.get("sshPort")
+        or env_root.get("port")
+        or ""
+    )
 
     env_prefix = ""
     if env_kind == "venv" and env_path:
@@ -240,6 +246,8 @@ async def _cookbook_register_task(
     cmd: str,
     task_type: str = "serve",
     *,
+    platform: str = "",
+    ssh_port: str = "",
     endpoint_added: bool = False,
     endpoint_id: str = "",
 ) -> bool:
@@ -273,6 +281,8 @@ async def _cookbook_register_task(
     # placeholder gives the user something to see immediately; it gets
     # replaced by real tmux output within a few seconds.
     target = f"{host}:" if host else "local:"
+    task_platform = (platform or "").strip().lower()
+    task_ssh_port = str(ssh_port or "").strip()
     placeholder = (
         f"Launched via agent — waiting for tmux output…\n"
         f"  session: {session_id}\n"
@@ -288,10 +298,16 @@ async def _cookbook_register_task(
         "status": "running",
         "output": placeholder,
         "ts": int(_time.time() * 1000),
-        "payload": {"repo_id": model, "remote_host": host or "", "_cmd": cmd},
+        "payload": {
+            "repo_id": model,
+            "remote_host": host or "",
+            "ssh_port": task_ssh_port,
+            "platform": task_platform,
+            "_cmd": cmd,
+        },
         "remoteHost": host or "",
-        "sshPort": "",
-        "platform": "linux",
+        "sshPort": task_ssh_port,
+        "platform": task_platform,
         "_serveReady": False,
         "_endpointAdded": bool(endpoint_added),
         "_endpointId": endpoint_id or "",
@@ -468,6 +484,8 @@ async def do_download_model(content: str, owner: Optional[str] = None) -> Dict:
                 session_id=sid, model=repo_id, host=host,
                 cmd=(f"ollama pull {repo_id}" if backend == "ollama" else f"hf download {repo_id}"),
                 task_type="download",
+                platform=env_cfg.get("platform") or "",
+                ssh_port=env_cfg.get("ssh_port") or "",
             )
             note = "" if registered else " (state-write failed — download may not show in UI)"
             where = host or "local"
@@ -559,6 +577,8 @@ async def do_serve_model(content: str, owner: Optional[str] = None) -> Dict:
             registered = await _cookbook_register_task(
                 session_id=sid, model=repo_id,
                 host=host, cmd=cmd, task_type="serve",
+                platform=env_cfg.get("platform") or "",
+                ssh_port=env_cfg.get("ssh_port") or "",
                 endpoint_added=endpoint_added, endpoint_id=endpoint_id or "",
             )
             note = "" if registered else " (state-write failed — task may not show in UI)"
@@ -713,21 +733,20 @@ async def do_list_served_models(content: str, owner: Optional[str] = None) -> Di
 
 async def _cookbook_kill_session(session_id: str, *, remote_host: str = "",
                                  ssh_port: str = "", verb: str = "Stopped") -> Dict:
-    """Kill a cookbook tmux session — remote-aware — AND mark the task
-    stopped in cookbook_state.json. Shared by stop_served_model and
-    cancel_download so both behave identically.
+    """Stop a cookbook session (download or serve) and mark it stopped in state.
 
-    Resolves the task's remote host from state when not passed in. A
-    local-only `tmux kill-session` silently no-ops for remote tasks —
-    that's the bug where "stop the download" appeared to work but the
-    download kept running on the remote host.
+    Delegates to POST /api/cookbook/stop-session so local Windows detached
+    downloads, remote hosts, and tmux-backed POSIX sessions all use the same
+    server-side kill logic as the UI Stop button.
     """
     from src.tool_implementations import _internal_headers, _INTERNAL_BASE  # shared, lives in facade
     import httpx
-    import shlex
     headers = _internal_headers()
     remote = remote_host or ""
     sport = ssh_port or ""
+    platform = ""
+    repo_id = ""
+    task_type = ""
 
     # Look up the task's host + confirm it exists in state.
     state: Dict[str, Any] = {}
@@ -747,42 +766,69 @@ async def _cookbook_kill_session(session_id: str, *, remote_host: str = "",
                 remote = t.get("remoteHost") or ""
             if not sport:
                 sport = t.get("sshPort") or ""
+            platform = t.get("platform") or ""
+            task_type = (t.get("type") or "").strip().lower()
+            payload = t.get("payload") if isinstance(t.get("payload"), dict) else {}
+            if not platform:
+                platform = (payload.get("platform") or "").strip()
+            repo_id = payload.get("repo_id") or ""
             break
 
+    if not platform and not remote:
+        env = state.get("env") if isinstance(state.get("env"), dict) else {}
+        platform = env.get("hostPlatform") or ""
+
+    # The configured remote profile is authoritative. Older agent task entries
+    # hard-coded platform="linux" and omitted the profile port, so reconcile
+    # stale as well as missing metadata before selecting the stop path.
     if remote:
+        try:
+            servers = await _cookbook_servers()
+            for h in servers.get("hosts") or []:
+                if (h.get("host") or "") != remote:
+                    continue
+                configured_platform = (h.get("platform") or "").strip()
+                if configured_platform:
+                    platform = configured_platform
+                if not sport:
+                    sport = str(h.get("port") or "").strip()
+                break
+        except Exception as e:
+            logger.debug(f"cookbook platform lookup failed for {remote}: {e}")
         try:
             remote, sport = _validate_cookbook_ssh_target(remote, sport)
         except HTTPException as e:
             return {"error": str(getattr(e, "detail", e)), "exit_code": 1}
-        _pf = f"-p {shlex.quote(str(sport))} " if sport and str(sport) != "22" else ""
-        cmd = (
-            f"ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no "
-            f"{_pf}{shlex.quote(remote)} 'tmux kill-session -t {shlex.quote(session_id)}'"
-        )
-        target_label = f"{session_id} on {remote}"
-    else:
-        cmd = f"tmux kill-session -t {shlex.quote(session_id)}"
-        target_label = session_id
+
+    target_label = f"{session_id} on {remote}" if remote else session_id
+    body: Dict[str, Any] = {
+        "session_id": session_id,
+        "remote_host": remote,
+        "ssh_port": sport,
+        "platform": platform,
+        "task_type": task_type,
+    }
+    # Download-only: HF repo_id drives stopped-repo markers / orphan cleanup.
+    if repo_id and task_type == "download":
+        body["repo_id"] = repo_id
 
     try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.post(f"{_INTERNAL_BASE}/api/shell/exec",
-                                     json={"command": cmd}, headers=headers)
+        async with httpx.AsyncClient(timeout=20) as client:
+            resp = await client.post(
+                f"{_INTERNAL_BASE}/api/cookbook/stop-session",
+                json=body,
+                headers=headers,
+            )
         if resp.status_code >= 400:
-            return {"error": f"shell/exec returned HTTP {resp.status_code}: {resp.text[:200]}", "exit_code": 1}
+            return {"error": f"stop-session returned HTTP {resp.status_code}: {resp.text[:200]}", "exit_code": 1}
         try:
             data = resp.json()
         except Exception:
             data = {}
-        kill_failed = isinstance(data, dict) and data.get("exit_code") not in (None, 0)
-        kill_err = ((data.get("stderr") or data.get("error") or "").strip() if isinstance(data, dict) else "")
-        # "no server running" / "can't find session" means it was already
-        # gone — treat as success (the goal is "not running").
-        already_gone = any(s in kill_err.lower() for s in ("no server running", "can't find session", "session not found"))
-        if kill_failed and not already_gone:
-            return {"error": f"Failed to {verb.lower()} {target_label}: {kill_err or 'kill-session returned non-zero'}", "exit_code": 1}
+        if not isinstance(data, dict) or not data.get("ok"):
+            err = (data.get("error") or data.get("detail") or "stop-session failed") if isinstance(data, dict) else "stop-session failed"
+            return {"error": f"Failed to {verb.lower()} {target_label}: {err}", "exit_code": 1}
 
-        # Update state: mark stopped (so the UI + list reflect reality).
         if matched is not None:
             try:
                 matched["status"] = "stopped"
@@ -792,8 +838,7 @@ async def _cookbook_kill_session(session_id: str, *, remote_host: str = "",
             except Exception as e:
                 logger.debug(f"failed to mark {session_id} stopped in state: {e}")
 
-        suffix = " (was already gone)" if already_gone else ""
-        return {"output": f"{verb} {target_label}{suffix}", "exit_code": 0}
+        return {"output": f"{verb} {target_label}", "exit_code": 0}
     except Exception as e:
         return {"error": str(e), "exit_code": 1}
 
@@ -1332,6 +1377,8 @@ async def do_serve_preset(content: str, owner: Optional[str] = None) -> Dict:
             registered = await _cookbook_register_task(
                 session_id=sid, model=repo_id, host=host,
                 cmd=cmd, task_type="serve",
+                platform=env_cfg.get("platform") or "",
+                ssh_port=env_cfg.get("ssh_port") or "",
                 endpoint_added=endpoint_added, endpoint_id=endpoint_id or "",
             )
             note = "" if registered else " (state-write failed — task may not show in UI)"
