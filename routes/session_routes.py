@@ -560,7 +560,7 @@ def setup_session_routes(
         except (AttributeError, TypeError, ValueError) as exc:
             raise HTTPException(400, "Invalid message attachment metadata") from exc
         for m in messages:
-            sess.add_message(ChatMessage(m["role"], m["content"], metadata=m.get("metadata")))
+            session_manager.add_message(sess.id, ChatMessage(m["role"], m["content"], metadata=m.get("metadata")))
         session_manager.save_sessions()
         return {"ok": True, "count": len(messages)}
 

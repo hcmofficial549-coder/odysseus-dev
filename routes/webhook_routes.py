@@ -374,15 +374,11 @@ def setup_webhook_routes(
             session_id = sid
 
         # --- Send message and get response ---
-        sess.add_message(ChatMessage("user", message))
+        session_manager.add_message(sess.id, ChatMessage("user", message))
 
         messages = [{"role": m.role, "content": m.content} for m in sess.history]
-
-        reply = await llm_call_async(
-            sess.endpoint_url, sess.model, messages,
-            headers=sess.headers, timeout=120,
-        )
-        sess.add_message(ChatMessage("assistant", reply))
+        reply = await llm_call_async(sess.endpoint_url, sess.model, messages, headers=sess.headers)
+        session_manager.add_message(sess.id, ChatMessage("assistant", reply))
         session_manager.save_sessions()
 
         webhook_manager.fire_and_forget("chat.completed", {

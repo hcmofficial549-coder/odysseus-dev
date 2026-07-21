@@ -12,7 +12,6 @@ from src.memory import MemoryManager
 from src.memory_provider import MemoryProviderRegistry, NativeMemoryProvider
 from services.memory.skills import SkillsManager
 from core.session_manager import SessionManager
-from core.models import set_session_manager
 from src.personal_docs import PersonalDocsManager
 from src.api_key_manager import APIKeyManager
 from src.preset_manager import PresetManager
@@ -48,7 +47,6 @@ def initialize_managers(base_dir: str, rag_manager=None) -> Dict[str, Any]:
     memory_manager = MemoryManager(DATA_DIR)
     skills_manager = SkillsManager(DATA_DIR)
     session_manager = SessionManager(SESSIONS_FILE)
-    set_session_manager(session_manager)  # Enable Session.add_message() persistence
     upload_handler = UploadHandler(base_dir, UPLOAD_DIR)
     session_manager.upload_handler = upload_handler
     set_upload_handler(upload_handler)
