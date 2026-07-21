@@ -42,6 +42,9 @@ git clone https://github.com/odysseus-dev/odysseus.git
 cd odysseus
 python3 -m venv venv
 source venv/bin/activate
+export PIP_CACHE_DIR="${PIP_CACHE_DIR:-./data/pip-cache}"
+export TMPDIR="${TMPDIR:-./data/tmp}"
+mkdir -p "$PIP_CACHE_DIR" "$TMPDIR"
 pip install -r requirements.txt
 python setup.py
 python -m uvicorn app:app --host 127.0.0.1 --port 7000
@@ -89,7 +92,9 @@ unless you opt in.
 **Cookbook storage in Docker.** Downloads live in `./data/huggingface`
 (`~/.cache/huggingface` in the container). Cookbook-installed Python CLIs and
 serve engines live in `./data/local` (`~/.local` in the container), so they
-survive container recreation.
+survive container recreation. Pip wheel/build caches and temp files go to
+`./data/pip-cache` and `./data/tmp` (not `$HOME`), which avoids filling a small
+home partition during **Cookbook → Dependencies** installs.
 
 **Remote servers.** In **Cookbook -> Settings -> Servers**, generate the
 Odysseus SSH key and add the public key to the remote server's
@@ -380,6 +385,16 @@ A grab-bag of small gotchas that otherwise turn into long debugging sessions.
 - **Self-hosted ntfy reminders don't reach your phone.** Two things: (1) the bundled ntfy binds to loopback by default — to reach it from your phone set `NTFY_BIND` to your host/Tailscale IP and `NTFY_BASE_URL` to the same server URL in `.env`, then recreate the ntfy container (see the `NTFY_*` block in `.env.example`); (2) in the ntfy **Android** app, subscribe to the topic with **Instant delivery** enabled — non-`ntfy.sh` servers don't get instant push otherwise.
 - **Local mail (Dovecot) login fails: "Plaintext authentication disallowed on non-encrypted connections."** Your IMAP/SMTP server is refusing cleartext auth over an unencrypted link. Prefer enabling TLS on the mail server; on a trusted LAN only, you can allow cleartext (Dovecot: `disable_plaintext_auth = no`).
 - **Calendar/contacts (Radicale) won't sync.** Point Odysseus at the **full collection URL** with its trailing slash — e.g. `http://host:5232/<user>/<collection-id>/` — not just the server root. Radicale shows this address for each calendar/address book in its web UI.
+- **Pip install runs out of disk on `$HOME`.** Odysseus does not write app data into your home directory, but `pip` and wheel builds cache under `~/.cache/pip` and `$TMPDIR` by default. If you see `No space left on device` under `/home/.../.cache/pip` while installing requirements or Cookbook dependencies, redirect those paths before retrying:
+
+  ```bash
+  export PIP_CACHE_DIR=/path/with/space/pip-cache
+  export TMPDIR=/path/with/space/tmp
+  mkdir -p "$PIP_CACHE_DIR" "$TMPDIR"
+  pip install -r requirements.txt   # or rerun the Cookbook dependency install
+  ```
+
+  Docker Compose sets these to `./data/pip-cache` and `./data/tmp` automatically. For a remote Cookbook server with the same issue, set the same variables in **Cookbook → Settings → env prefix** (or in that server's shell profile).
 
 ### Optional Dependencies
 `requirements-optional.txt` contains packages that unlock extra features. It is not installed by default.

@@ -131,6 +131,12 @@ fi
 #    Named `venv` to match the manual steps and build-macos-app.sh, so the
 #    clickable .app reuses this same environment.
 VENV_PY="./venv/bin/python3"
+# Keep pip wheel/build caches off $HOME — small home partitions can otherwise
+# fail installs with "No space left on device" (#1219).
+PIP_CACHE_DIR="${PIP_CACHE_DIR:-$REPO_DIR/data/pip-cache}"
+TMPDIR="${TMPDIR:-$REPO_DIR/data/tmp}"
+mkdir -p "$PIP_CACHE_DIR" "$TMPDIR"
+export PIP_CACHE_DIR TMPDIR
 if [ ! -x "$VENV_PY" ] || ! "$VENV_PY" -m pip --version >/dev/null 2>&1; then
     [ -d venv ] && { echo "▶ Existing venv is incomplete (no working pip) — rebuilding…"; rm -rf venv; }
     echo "▶ Creating Python environment…"
