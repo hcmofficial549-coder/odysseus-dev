@@ -694,6 +694,8 @@ app.include_router(setup_history_routes(session_manager, upload_handler=upload_h
 # Search
 from routes.search_routes import setup_search_routes
 app.include_router(setup_search_routes(config))
+from routes.unified_search_routes import setup_unified_search_routes
+app.include_router(setup_unified_search_routes(memory_manager, memory_vector=memory_vector))
 
 # Presets
 from routes.preset_routes import setup_preset_routes
