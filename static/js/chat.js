@@ -22,7 +22,7 @@ import codeRunnerModule from './codeRunner.js';
 import slashCommands, { initSlashCommands, isCommand, handleSlashCommand, handleSetupInput, handleSetupWizard, typewriterInto } from './slashCommands.js';
 import createResearchSynapse from './researchSynapse.js';
 import { createStreamRenderer } from './streamingRenderer.js';
-import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composerArrowUpRecall.js';
+import { wireArrowUpRecall,getUserMessagesFromChatHistory } from './composerArrowUpRecall.js';
 
   const RESEARCH_TIMEOUT_MS = 360000;
   const DEFAULT_TIMEOUT_MS = 120000;
@@ -351,8 +351,13 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
     }).catch(() => {});
 
     // ArrowUp on empty composer recalls last user message (like many chat apps).
+    // Prefer the cached session history (full prompt list) over the rendered DOM
+    // so traversal covers the entire session even when not all pages are mounted.
     const _wireArrowUpRecall = (composer) =>
-      wireArrowUpRecall(composer, () => getLastUserMessageFromChatHistory(), {
+      wireArrowUpRecall(composer, () => {
+        const cached = sessionModule.getCachedUserMessages();
+        return cached.length ? cached : getUserMessagesFromChatHistory(document);
+      }, {
         autoResize: uiModule?.autoResize,
       });
 
@@ -986,6 +991,11 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       let _userMsgEl = null;
       if (!skipBubble) {
         _userMsgEl = addMessage('user', userDisplay, null, _pendingAttachInfo ? { attachments: _pendingAttachInfo } : null);
+        // Append live user message to cached history so ArrowUp recall covers it
+        if (_userMsgEl) {
+          const raw = _userMsgEl.dataset?.raw;
+          if (raw) sessionModule.getCachedUserMessages().push(raw);
+        }
       }
       _sendPerf.mark('user_bubble_visible');
       messageInput.value = '';
