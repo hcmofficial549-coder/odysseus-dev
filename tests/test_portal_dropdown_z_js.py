@@ -100,10 +100,20 @@ def test_late_routed_dropdowns_use_top_portal_z(rel):
     assert "topPortalZ()" in src, f"{rel} must call topPortalZ() for its dropdown z"
 
 
-@pytest.mark.parametrize("rel", ["static/js/tasks.js", "static/js/skills.js", "static/style.css"])
+@pytest.mark.parametrize("rel", ["static/js/tasks.js", "static/js/skills.js"])
 def test_no_hardcoded_portal_z_literals_remain(rel):
     src = (ROOT / rel).read_text()
     # Match the exact 100000/100002 these dropdowns used; the trailing-digit
     # guard avoids false-matching an unrelated 1000000 elsewhere.
     hits = re.findall(r"z-index:\s*10000[02](?!\d)", src)
     assert not hits, f"{rel} still has hardcoded portal z: {hits}"
+
+
+def test_no_hardcoded_portal_z_literals_remain_in_css():
+    # style.css was split into modular files under static/css/; assert against
+    # the same concatenated bundle the browser resolves via index.css imports.
+    from tests.helpers.css_loader import load_runtime_css_text
+
+    src = load_runtime_css_text()
+    hits = re.findall(r"z-index:\s*10000[02](?!\d)", src)
+    assert not hits, f"runtime CSS still has hardcoded portal z: {hits}"
