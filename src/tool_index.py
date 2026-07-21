@@ -27,22 +27,36 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+# The set of tools deemed safe to be "always available" regardless of routing relevance.
+# High-impact mutating, shell, and admin tools should rely on RAG or keyword hints.
+SAFE_DEFAULTABLE_TOOLS = frozenset({
+    "ask_user",
+    "ui_control",
+    "list_sessions",
+    "search_chats",
+    "list_models",
+    "web_search",
+    "web_fetch",
+    "generate_image",
+})
+
+# Core tools that are always available by default regardless of user settings.
+CORE_DEFAULT_TOOLS = frozenset({
+    "manage_memory",
+    "ask_user",
+    "update_plan",
+})
+
 # Tools that are ALWAYS included regardless of retrieval results.
 # Keep this deliberately tiny. Domain tools (web, documents, email,
 # cookbook/model serving, files, settings, etc.) are injected by retrieval or
 # keyword intent so a trivial agent prompt like "test" does not carry every
 # domain's schemas and rules.
-ALWAYS_AVAILABLE = frozenset({
-    # Memory is ambient — "remember this" can follow any message regardless
-    # of topic. Without this, RAG drops it and the agent falls back to
-    # app_api /api/memory/add which fails with 422 on first attempt.
-    "manage_memory",
-    # Ask the user a multiple-choice question for a decision/clarification.
-    # Always reachable so the agent can pause and ask at any point.
-    "ask_user",
-    # Write back to the active plan (tick steps done / revise) during execution.
-    "update_plan",
-})
+def get_always_available_tools() -> frozenset:
+    from src.settings import get_setting
+    enabled = get_setting("enabled_tools", [])
+    optional = frozenset([t for t in enabled if t in SAFE_DEFAULTABLE_TOOLS])
+    return CORE_DEFAULT_TOOLS.union(optional)
 
 # Tools that the Personal Assistant always has access to during scheduled
 # check-ins and proactive tasks, in addition to RAG-selected tools.
@@ -513,7 +527,7 @@ class ToolIndex:
         self, query: str, k: int = 8, always_include: Optional[Set[str]] = None
     ) -> Set[str]:
         """Get the set of tool names to include for a given user query."""
-        base = set(always_include or ALWAYS_AVAILABLE)
+        base = set(always_include or get_always_available_tools())
         retrieved = self.retrieve(query, k=k)
         base.update(retrieved)
         # Keyword-based force-include for common intents. Match on word

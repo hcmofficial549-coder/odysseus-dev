@@ -2633,25 +2633,49 @@ def setup_model_routes(model_discovery):
 
     @router.get("/tools")
     def list_tools():
-        """List all available tools with their enabled/disabled status."""
+        """List all available tools with their enabled/disabled status and whether they are active by default."""
         from src.agent_tools import TOOL_TAGS
+        from src.settings import DEFAULT_SETTINGS
+        from src.tool_schemas import FUNCTION_TOOL_SCHEMAS
+        import json
+
+        schema_tokens = {}
+        for s in FUNCTION_TOOL_SCHEMAS:
+            if "function" in s:
+                # ~0.3 is the token estimation heuristic used in model_context.py
+                schema_tokens[s["function"]["name"]] = int(len(json.dumps(s)) * 0.3)
+
         settings = _load_settings()
         disabled = set(settings.get("disabled_tools", []))
+        enabled_tools = set(settings.get("enabled_tools", DEFAULT_SETTINGS["enabled_tools"]))
         tools = []
         for tag in sorted(TOOL_TAGS):
-            tools.append({"id": tag, "enabled": tag not in disabled})
+            tools.append({
+                "id": tag,
+                "enabled": tag not in disabled,
+                "is_default": tag in enabled_tools,
+                "auto_ctx": f"~{schema_tokens.get(tag, 100)}"
+            })
         return {"tools": tools}
 
     class ToolsUpdate(BaseModel):
-        disabled: list = []
+        disabled: list | None = None
+        enabled_tools: list | None = None
 
     @router.post("/tools")
     def update_tools(body: ToolsUpdate, request: Request):
-        """Update which tools are disabled."""
+        """Update which tools are disabled and which are active by default."""
         require_admin(request)
         settings = _load_settings()
-        settings["disabled_tools"] = body.disabled
+        if body.disabled is not None:
+            settings["disabled_tools"] = body.disabled
+        if body.enabled_tools is not None:
+            from src.tool_index import SAFE_DEFAULTABLE_TOOLS
+            # Filter the incoming list through the safety policy so arbitrary high-impact
+            # tools cannot be persisted as defaults.
+            safe_enabled = [t for t in body.enabled_tools if t in SAFE_DEFAULTABLE_TOOLS]
+            settings["enabled_tools"] = safe_enabled
         _save_settings(settings)
-        return {"ok": True, "disabled": body.disabled}
+        return {"ok": True, "disabled": body.disabled, "enabled_tools": settings.get("enabled_tools", [])}
 
     return router
