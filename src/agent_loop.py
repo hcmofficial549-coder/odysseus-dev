@@ -277,7 +277,8 @@ _DOMAIN_RULES = {
 - For latest/newest email, list with `max_results: 1`, `unread_only: false`, then read the returned UID if needed.
 - For named mailboxes/accounts, call `list_email_accounts` if needed and pass the exact `account` value.
 - Bulk email actions use `bulk_email` once with explicit UIDs; do not loop one message at a time.
-- "Write/draft a reply saying X" means open a pre-filled draft via `ui_control open_email_reply ... <body>` / structured `body`; only `reply_to_email` when the user clearly wants to send now.""",
+- "Write/draft a reply saying X" means open a pre-filled draft via `ui_control open_email_reply ... <body>` / structured `body`; only `reply_to_email` when the user clearly wants to send now.
+- Attachments: when an email has attachments and the user asks to read/analyze/summarize the attachment, call `read_email_attachment` with the email UID and attachment index to extract text inline. Use `download_attachment` only if the user explicitly wants the file saved to disk. If `read_email_attachment` returns empty content, the PDF is very likely scanned/image-only — try `download_attachment` to save it, or inform the user.""",
     "cookbook": """\
 ## Cookbook/model-serving rules
 - Cookbook is the LLM-serving subsystem.
@@ -323,7 +324,7 @@ _DOMAIN_RULES = {
 _DOMAIN_TOOL_MAP = {
     "web": set(WEB_TOOL_NAMES),
     "documents": {"create_document", "edit_document", "update_document", "suggest_document", "manage_documents"},
-    "email": {"list_email_accounts", "list_emails", "read_email", "send_email", "reply_to_email", "bulk_email", "archive_email", "delete_email", "mark_email_read", "resolve_contact", "manage_contact"},
+    "email": {"list_email_accounts", "list_emails", "read_email", "send_email", "reply_to_email", "bulk_email", "archive_email", "delete_email", "mark_email_read", "resolve_contact", "manage_contact", "download_attachment", "read_email_attachment", "draft_email", "draft_email_reply"},
     "cookbook": {"download_model", "serve_model", "serve_preset", "list_serve_presets", "list_served_models", "stop_served_model", "tail_serve_output", "list_downloads", "cancel_download", "search_hf_models", "list_cached_models", "list_cookbook_servers", "adopt_served_model"},
     "notes_calendar_tasks": {"manage_notes", "manage_calendar", "manage_tasks"},
     "ui": {"ui_control"},
@@ -2877,6 +2878,9 @@ async def stream_agent_loop(
                 _relevant_tools.difference_update(_email_fetch_tools)
                 logger.info("[agent-intent] active email draft pruned fetch tools=%s", removed)
 
+    if _relevant_tools is not None and active_email:
+        _relevant_tools.update(_DOMAIN_TOOL_MAP.get("email", set()))
+
     # Current-turn chat uploads are real files under the upload/data root. Make
     # the read-side file/document tools visible immediately so the agent can
     # inspect files whose inline text was truncated or omitted.
@@ -3280,6 +3284,7 @@ async def stream_agent_loop(
         round_response = ""
         round_reasoning = ""  # reasoning_content deltas (DeepSeek-thinking, vLLM --reasoning-parser)
         native_tool_calls = []  # populated if model uses function calling
+        all_tool_schemas = []
         # Reset doc streaming state per round
         _doc_acc = ""
         _doc_opened = False
@@ -3313,9 +3318,18 @@ async def stream_agent_loop(
                     s for s in FUNCTION_TOOL_SCHEMAS
                     if s.get("function", {}).get("name") in _schema_names
                 ]
+                def _mcp_schema_is_relevant(schema: dict) -> bool:
+                    name = schema.get("function", {}).get("name", "")
+                    if name in _relevant_tools:
+                        return True
+                    parts = name.split("__", 2)
+                    if len(parts) == 3 and parts[0] == "mcp" and parts[2] in _relevant_tools:
+                        return True
+                    return False
+
                 _mcp_filtered = [
                     s for s in mcp_schemas
-                    if s.get("function", {}).get("name") in _relevant_tools
+                    if _mcp_schema_is_relevant(s)
                 ]
                 all_tool_schemas = base_schemas + _mcp_filtered
             else:
@@ -3332,15 +3346,12 @@ async def stream_agent_loop(
                     if t.get("function", {}).get("name") not in disabled_tools
                     and t.get("name") not in disabled_tools
                 ]
-        else:
-            # Local: only MCP schemas when message suggests MCP tool usage
-            _last_content = _last_user.lower()
-            _wants_mcp = any(kw in _last_content for kw in _MCP_KEYWORDS)
-            all_tool_schemas = mcp_schemas if (_wants_mcp and mcp_schemas) else []
-        agent_stream_timeout = int(get_setting("agent_stream_timeout_seconds", 300) or 300)
+        _tool_names_sent = [
+            t.get("function", {}).get("name") or t.get("name")
+            for t in (all_tool_schemas or [])
+        ]
 
-        _tool_names_sent = [t.get("function", {}).get("name") for t in (all_tool_schemas or []) if t.get("function")]
-        logger.info(f"[agent-debug] round={round_num} model={model} _is_api_model={_is_api_model} tools_sent={len(_tool_names_sent)} tool_names={_tool_names_sent[:15]} relevant_tools={sorted(_relevant_tools)[:15] if _relevant_tools else 'ALL'}")
+        agent_stream_timeout = int(get_setting("agent_stream_timeout_seconds", 300) or 300)
 
         # Primary target + any configured fallback models. stream_llm_with_fallback
         # only switches on a pre-content failure, so streamed output is never
