@@ -33,6 +33,8 @@ from src.task_endpoint import resolve_task_candidates, task_llm_call_async
 
 from routes.email_helpers import (
     _strip_think, _extract_reply, _apply_email_style_mechanics, _load_settings, _save_settings, _get_email_config,
+    _account_visible_to_owner,
+    EmailNotConfiguredError,
     _send_smtp_message,
     _imap_connect, _imap, _decode_header,
     _detect_sent_folder, _detect_spam_folder, _imap_move,
@@ -100,6 +102,24 @@ def _owner_for_email_account(account_id: str | None) -> str:
         return ""
 
 
+def _account_visible_to_task_owner(account_id: str | None, owner: str) -> bool:
+    """Check an explicit task account against the canonical visibility policy."""
+    if not account_id or not owner:
+        return True
+    from core.database import SessionLocal as _SL, EmailAccount as _EA
+
+    db = _SL()
+    try:
+        row = db.query(_EA).filter(_EA.id == account_id).first()
+        return (
+            row is not None
+            and bool(row.enabled)
+            and _account_visible_to_owner(row, owner)
+        )
+    finally:
+        db.close()
+
+
 # ── Routes ──
 
 async def _emit_progress(progress_cb, message: str):
@@ -119,6 +139,7 @@ async def _run_auto_summarize_once(do_summary: bool = True, do_reply: bool = Tru
                                    days_back: int = 1,
                                    account_id: str | None = None,
                                    max_process: int | None = None,
+                                   owner: str = "",
                                    progress_cb=None) -> str:
     """One iteration of the email scan. Temporarily flips settings flags
     so the existing background-loop logic runs exactly once for the requested ops."""
@@ -137,6 +158,7 @@ async def _run_auto_summarize_once(do_summary: bool = True, do_reply: bool = Tru
             days_back=days_back,
             account_id=account_id,
             max_process=max_process,
+            owner=owner,
             progress_cb=progress_cb,
         )
     finally:
@@ -176,7 +198,7 @@ def _latest_inbox_fallback_uids(conn, reconnect):
         return [], reconnect()
 
 
-async def _auto_summarize_pass(days_back: int = 1, account_id: str | None = None, max_process: int | None = None, progress_cb=None) -> str:
+async def _auto_summarize_pass(days_back: int = 1, account_id: str | None = None, max_process: int | None = None, owner: str = "", progress_cb=None) -> str:
     """Single pass of the auto-summarize/reply scan.
 
     When account_id is None, iterates over every enabled account in
@@ -194,19 +216,29 @@ async def _auto_summarize_pass(days_back: int = 1, account_id: str | None = None
                     .order_by(_EA.is_default.desc(), _EA.created_at.asc())
                     .all()
                 )
+                if owner:
+                    rows = [r for r in rows if _account_visible_to_owner(r, owner)]
                 ids = [r.id for r in rows]
                 names = {r.id: r.name for r in rows}
             finally:
                 db.close()
         except Exception:
+            if owner:
+                raise
             ids = []
             names = {}
+        if not ids and owner:
+            raise EmailNotConfiguredError(
+                "No email accounts are available to this task owner"
+            )
         if len(ids) <= 1:
-            # Single-account (or zero rows — fallback to legacy settings.json lookup)
+            # Unscoped zero-account callers retain the single-user legacy
+            # settings fallback. Owner-scoped callers fail closed above.
             return await _auto_summarize_pass_single(
                 days_back=days_back,
                 account_id=(ids[0] if ids else None),
                 max_process=max_process,
+                owner=owner,
                 progress_cb=progress_cb,
             )
         outs = []
@@ -217,6 +249,7 @@ async def _auto_summarize_pass(days_back: int = 1, account_id: str | None = None
                     days_back=days_back,
                     account_id=aid,
                     max_process=max_process,
+                    owner=owner,
                     progress_cb=progress_cb,
                 )
                 outs.append(f"[{names.get(aid, aid[:8])}] {result}")
@@ -228,11 +261,12 @@ async def _auto_summarize_pass(days_back: int = 1, account_id: str | None = None
         days_back=days_back,
         account_id=account_id,
         max_process=max_process,
+        owner=owner,
         progress_cb=progress_cb,
     )
 
 
-async def _auto_summarize_pass_single(days_back: int = 1, account_id: str | None = None, max_process: int | None = None, progress_cb=None) -> str:
+async def _auto_summarize_pass_single(days_back: int = 1, account_id: str | None = None, max_process: int | None = None, owner: str = "", progress_cb=None) -> str:
     """Single pass of the auto-summarize/reply scan for ONE account.
     Reads current settings flags."""
     import asyncio
@@ -249,11 +283,18 @@ async def _auto_summarize_pass_single(days_back: int = 1, account_id: str | None
         return "Nothing to do"
 
     # Owner of the account being processed. All calendar + mailbox reads/writes
-    # below are scoped to this user: the multi-account fan-out runs every user's
-    # mailbox, so an unscoped pass would disclose/mutate other tenants' data.
+    # below are scoped to this user. Owner-filtered fan-out must never process
+    # another tenant's mailbox, or it could disclose/mutate that tenant's data.
     # One resolution feeds both the mailbox path (account_owner) and upstream's
     # calendar path (_acct_owner, which expects None rather than "").
-    account_owner = _owner_for_email_account(account_id)
+    if owner and account_id and not _account_visible_to_task_owner(account_id, owner):
+        raise PermissionError(
+            "Email account is not available to this task owner"
+        )
+
+    # A scheduled task owner is authoritative. Only trusted legacy/system
+    # callers without an owner may derive authority from the account row.
+    account_owner = owner or _owner_for_email_account(account_id)
     _acct_owner = account_owner or None
 
     conn = None
