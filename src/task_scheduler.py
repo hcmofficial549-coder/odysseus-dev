@@ -403,17 +403,26 @@ class TaskScheduler:
         notifications and prevent cross-tenant drain. `body` is the result
         text — populated when output_target='notification' so the client can
         show a rich browser Notification, not just a toast."""
-        self._pending_notifications.append({
+        from routes.ws_routes import _ANONYMOUS_OWNER
+        note_owner = _ANONYMOUS_OWNER if (owner is not None and not owner) else owner
+        note = {
             "task_name": task_name,
             "status": status,
             "task_id": task_id,
-            "owner": owner,
+            "owner": note_owner,
             "body": (body[:500] + "…") if body and len(body) > 500 else body,
             "timestamp": _utcnow().isoformat() + "Z",
-        })
+        }
+        self._pending_notifications.append(note)
         # Cap at 50 to avoid unbounded growth
         if len(self._pending_notifications) > 50:
             self._pending_notifications = self._pending_notifications[-50:]
+        # Push to WebSocket subscribers if the channel is available
+        try:
+            from routes.ws_routes import push_notification
+            push_notification(note_owner, note)
+        except Exception:
+            pass
 
     def pop_notifications(self, owner: str = None) -> list:
         """Return and clear pending notifications.
@@ -424,7 +433,9 @@ class TaskScheduler:
         or when no owner filter is given — preserves backward behaviour
         for the legacy single-user deploy.
         """
-        if owner is None:
+        from routes.ws_routes import _ANONYMOUS_OWNER
+        _owner = _ANONYMOUS_OWNER if (owner is not None and not owner) else owner
+        if _owner is None:
             notes = self._pending_notifications[:]
             self._pending_notifications.clear()
             return notes
@@ -433,7 +444,7 @@ class TaskScheduler:
         # any authenticated user once a second account existed.
         keep, take = [], []
         for n in self._pending_notifications:
-            if n.get("owner") == owner:
+            if n.get("owner") == _owner:
                 take.append(n)
             else:
                 keep.append(n)
