@@ -828,7 +828,10 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
         }
         if (dc.endpoint_url && dc.model) {
           _sendPerf.mark('direct_chat_create_begin');
-          await sessionModule.createDirectChat(dc.endpoint_url, dc.model, dc.endpoint_id);
+          await sessionModule.createDirectChat(dc.endpoint_url, dc.model, dc.endpoint_id, {
+            reasoning_effort: dc.default_reasoning_effort || '',
+            verbosity: dc.default_verbosity || '',
+          });
           _sendPerf.mark('direct_chat_create_done');
           const ok = await sessionModule.materializePendingSession();
           _sendPerf.mark('direct_chat_materialize_done');
@@ -1208,6 +1211,14 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
         isAgentMode = true;
       }
       fd.append('mode', isAgentMode ? 'agent' : 'chat');
+      const reasoningEffort = (toggleState.reasoning_effort || 'auto').toLowerCase();
+      if (reasoningEffort && reasoningEffort !== 'auto') {
+        fd.append('reasoning_effort', reasoningEffort);
+      }
+      const verbosity = (toggleState.verbosity || 'auto').toLowerCase();
+      if (verbosity && verbosity !== 'auto') {
+        fd.append('verbosity', verbosity);
+      }
       if (el('web-toggle').checked) {
         if (!isAgentMode) {
           fd.append('use_web', 'true');

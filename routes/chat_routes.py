@@ -569,6 +569,21 @@ def setup_chat_routes(
         # manual form posts that still send plan_mode=true.
         plan_mode = False
         chat_mode = str(form_data.get("mode", "")).lower()  # 'chat' or 'agent'
+        reasoning_effort = (form_data.get("reasoning_effort") or "").strip()
+        verbosity = (form_data.get("verbosity") or "").strip()
+
+        def _stamp_requested_model_controls(metrics):
+            data = dict(metrics or {})
+            requested_reasoning = reasoning_effort.lower().replace("-", "_")
+            requested_verbosity = verbosity.lower()
+            if requested_reasoning and requested_reasoning not in ("auto", "default"):
+                if requested_reasoning == "x_high":
+                    requested_reasoning = "xhigh"
+                data["requested_reasoning_effort"] = requested_reasoning
+            if requested_verbosity and requested_verbosity not in ("auto", "default"):
+                data["requested_verbosity"] = requested_verbosity
+            return data
+
         # Workspace: confine the agent's file/shell tools to this folder.
         workspace, workspace_rejected = _resolve_request_workspace(
             request, form_data.get("workspace")
@@ -1255,6 +1270,8 @@ def setup_chat_routes(
                         prompt_type=preset_id,
                         tools=None,
                         session_id=session,
+                        reasoning_effort=reasoning_effort,
+                        verbosity=verbosity,
                     ):
                         if chunk.startswith("data: ") and not chunk.startswith("data: [DONE]"):
                             try:
@@ -1305,6 +1322,7 @@ def setup_chat_routes(
                                         last_metrics["tps_source"] = "backend"
                                     # Wall-clock response time for the stats popup ("Time").
                                     last_metrics.setdefault("response_time", round(time.time() - _chat_start, 2))
+                                    last_metrics = _stamp_requested_model_controls(last_metrics)
                                     yield f'data: {json.dumps({"type": "metrics", "data": last_metrics})}\n\n'
                             except json.JSONDecodeError:
                                 yield chunk
@@ -1332,9 +1350,10 @@ def setup_chat_routes(
                                     "requested_model": _requested_model,
                                     "usage_source": "estimated",
                                 }
+                                last_metrics = _stamp_requested_model_controls(last_metrics)
                                 yield f'data: {json.dumps({"type": "metrics", "data": last_metrics})}\n\n'
                             if full_response:
-                                _metrics_to_save = dict(last_metrics or {})
+                                _metrics_to_save = _stamp_requested_model_controls(last_metrics)
                                 if thinking_response.strip() and not _metrics_to_save.get("thinking"):
                                     _metrics_to_save["thinking"] = thinking_response.strip()
                                 _saved_id = save_assistant_response(
@@ -1364,11 +1383,11 @@ def setup_chat_routes(
                         logger.info("Client disconnected mid-stream (chat mode) for session %s, saving partial (%d chars)", session, len(full_response))
                         _stopped_content, _stopped_md = clean_thinking_for_save(
                             full_response,
-                            {
+                            _stamp_requested_model_controls({
                                 "stopped": True,
                                 "model": _actual_model or _answered_by or _requested_model,
                                 "requested_model": _requested_model,
-                            },
+                            }),
                         )
                         sess.add_message(ChatMessage("assistant", _stopped_content, metadata=_stopped_md))
                         if not incognito:
@@ -1427,6 +1446,8 @@ def setup_chat_routes(
                         plan_mode=plan_mode,
                         approved_plan=approved_plan or None,
                         workspace=workspace or None,
+                        reasoning_effort=reasoning_effort,
+                        verbosity=verbosity,
                         forced_tools=_forced_tools,
                         uploaded_files=ctx.uploaded_files,
                     ):
@@ -1485,6 +1506,7 @@ def setup_chat_routes(
                                         last_metrics["context_messages_after_trim"] = ctx.context_messages_after_trim
                                         last_metrics["context_tokens_before_trim"] = ctx.context_tokens_before_trim
                                         last_metrics["context_tokens_after_trim"] = ctx.context_tokens_after_trim
+                                    last_metrics = _stamp_requested_model_controls(last_metrics)
                                     yield f'data: {json.dumps({"type": "metrics", "data": last_metrics})}\n\n'
                             except json.JSONDecodeError:
                                 yield chunk
@@ -1494,7 +1516,7 @@ def setup_chat_routes(
                             _has_tool_events = bool((last_metrics or {}).get("tool_events"))
                             if full_response or _has_tool_events:
                                 _response_to_save = full_response or "Done."
-                                _metrics_to_save = dict(last_metrics or {})
+                                _metrics_to_save = _stamp_requested_model_controls(last_metrics)
                                 if thinking_response.strip() and not _metrics_to_save.get("thinking"):
                                     _metrics_to_save["thinking"] = thinking_response.strip()
                                 _saved_id = save_assistant_response(
@@ -1533,11 +1555,11 @@ def setup_chat_routes(
                             logger.info("Client disconnected mid-stream for session %s, saving partial response (%d chars)", session, len(full_response))
                             _stopped_content2, _stopped_md2 = clean_thinking_for_save(
                                 full_response,
-                                {
+                                _stamp_requested_model_controls({
                                     "stopped": True,
                                     "model": _actual_model or _answered_by or _requested_model,
                                     "requested_model": _requested_model,
-                                },
+                                }),
                             )
                             sess.add_message(ChatMessage("assistant", _stopped_content2, metadata=_stopped_md2))
                             if not incognito:

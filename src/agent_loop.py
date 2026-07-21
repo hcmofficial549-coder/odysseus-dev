@@ -2560,6 +2560,8 @@ async def stream_agent_loop(
     approved_plan: Optional[str] = None,
     tool_policy: Optional[ToolPolicy] = None,
     workspace: Optional[str] = None,
+    reasoning_effort: Optional[str] = None,
+    verbosity: Optional[str] = None,
     forced_tools: Optional[Set[str]] = None,
     uploaded_files: Optional[List[Dict]] = None,
     workload: str = "foreground",
@@ -3374,6 +3376,8 @@ async def stream_agent_loop(
             tool_choice_none=_ody_doc_finetune_mode,
             timeout=agent_stream_timeout,
             session_id=session_id,
+            reasoning_effort=reasoning_effort,
+            verbosity=verbosity,
             workload=workload,
         ):
             if not _round_first_event_logged:
